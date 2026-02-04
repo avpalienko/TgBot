@@ -1,0 +1,22 @@
+# Environment files with secrets
+.env
+.env.local
+.env.*.local
+
+# Binary
+bot
+bot.exe
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/

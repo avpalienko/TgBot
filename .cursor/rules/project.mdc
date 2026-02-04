@@ -1,0 +1,58 @@
+---
+description: TgBot - Telegram AI Assistant on Go
+globs: **/*
+alwaysApply: true
+---
+
+# TgBot Project Context
+
+## What is this
+
+Telegram bot on Go for AI access via OpenAI API. Whitelist authorization, in-memory conversation context.
+
+## Structure
+
+```
+cmd/bot/main.go          - entry point
+internal/
+    config/config.go     - env vars loading
+    bot/bot.go           - Telegram handlers
+    ai/openai.go         - OpenAI client
+    session/session.go   - conversation context (in-memory)
+    auth/whitelist.go    - access control
+```
+
+## Key Dependencies
+
+- `github.com/go-telegram-bot-api/telegram-bot-api/v5` - Telegram
+- `github.com/sashabaranov/go-openai` - OpenAI
+- `github.com/joho/godotenv` - .env loading
+
+## Configuration (env vars)
+
+- `TELEGRAM_BOT_TOKEN` - bot token
+- `OPENAI_API_KEY` - API key
+- `OPENAI_MODEL` - model (default: gpt-4o)
+- `ALLOWED_USERS` - whitelist user_id comma-separated
+
+## Bot Commands
+
+- `/start` - welcome
+- `/new` - clear context
+- `/model` - current model
+- Text message -> AI response
+
+## Documentation
+
+- Architecture & modules: [ARCHITECTURE.md](mdc:ARCHITECTURE.md)
+- Build & deployment: [DEPLOYMENT.md](mdc:DEPLOYMENT.md)
+
+## Coding Conventions
+
+- Indentation: 4 spaces, no tabs
+- All output files in English (code, comments, docs)
+- README.md always present in project root
+- Follow standard Go project structure (cmd/, internal/)
+- Secrets only via env vars, never in code
+- New AI providers via `ai.Provider` interface
+- Thread-safe access to shared state via mutex

@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    container_name: tgbot
+    restart: unless-stopped
+    env_file:
+      - .env
+    # Alternative: specify env vars directly
+    # environment:
+    #   - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+    #   - OPENAI_API_KEY=${OPENAI_API_KEY}
+    #   - OPENAI_MODEL=gpt-4o
+    #   - ALLOWED_USERS=${ALLOWED_USERS}
