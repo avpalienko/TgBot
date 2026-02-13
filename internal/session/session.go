@@ -8,8 +8,9 @@ import (
 
 // Message represents a chat message
 type Message struct {
-	Role    string // "user" or "assistant"
-	Content string
+	Role      string // "user" or "assistant"
+	Content   string
+	ImageData string // optional: base64 data URI for images
 }
 
 // Session holds conversation data for a user

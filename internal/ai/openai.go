@@ -32,9 +32,31 @@ func (p *OpenAIProvider) Complete(ctx context.Context, messages []session.Messag
 	// Convert session messages to OpenAI format
 	chatMessages := make([]openai.ChatCompletionMessage, len(messages))
 	for i, msg := range messages {
-		chatMessages[i] = openai.ChatCompletionMessage{
-			Role:    msg.Role,
-			Content: msg.Content,
+		if msg.ImageData != "" {
+			// Multimodal message: optional text + image
+			parts := []openai.ChatMessagePart{}
+			if msg.Content != "" {
+				parts = append(parts, openai.ChatMessagePart{
+					Type: openai.ChatMessagePartTypeText,
+					Text: msg.Content,
+				})
+			}
+			parts = append(parts, openai.ChatMessagePart{
+				Type: openai.ChatMessagePartTypeImageURL,
+				ImageURL: &openai.ChatMessageImageURL{
+					URL:    msg.ImageData,
+					Detail: openai.ImageURLDetailAuto,
+				},
+			})
+			chatMessages[i] = openai.ChatCompletionMessage{
+				Role:         msg.Role,
+				MultiContent: parts,
+			}
+		} else {
+			chatMessages[i] = openai.ChatCompletionMessage{
+				Role:    msg.Role,
+				Content: msg.Content,
+			}
 		}
 	}
 
