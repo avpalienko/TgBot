@@ -77,10 +77,15 @@ TgBot/
 │   │   └── openai.go            # OpenAI implementation
 │   ├── session/
 │   │   └── session.go           # In-memory conversation context storage
-│   └── auth/
-│       └── whitelist.go         # Access control by user_id
+│   ├── auth/
+│   │   └── whitelist.go         # Access control by user_id
+│   ├── logger/
+│   │   └── logger.go            # Logging abstraction (slog implementation)
+│   └── version/
+│       └── version.go           # Build version info (git commit, date)
 ├── scripts/
-│   ├── build-linux.ps1          # Cross-compile for Linux
+│   ├── build.ps1                # Build for current platform with version
+│   ├── build-linux.ps1          # Cross-compile for Linux with version
 │   ├── deploy.ps1               # Deploy binary to VPS
 │   └── docker-push.ps1          # Build and push Docker image
 ├── .env.example                 # Configuration example
@@ -130,6 +135,48 @@ type Provider interface {
 ```
 
 Allows easy addition of Claude, Gemini, etc.
+
+### `internal/logger`
+
+Logging abstraction with slog implementation:
+
+```go
+type Logger interface {
+    Debug(msg string, args ...any)
+    Info(msg string, args ...any)
+    Warn(msg string, args ...any)
+    Error(msg string, args ...any)
+    With(args ...any) Logger
+}
+```
+
+Features:
+- Swappable implementation (slog, zerolog, zap, logrus)
+- Configurable level and format (text/JSON)
+- Context propagation via `With()`
+- Global and per-component loggers
+
+Configuration:
+- `LOG_LEVEL` - debug, info, warn, error (default: info)
+- `LOG_FORMAT` - text, json (default: text)
+
+### `internal/version`
+
+Build-time version information injected via ldflags:
+
+```go
+var (
+    GitCommit = "unknown"  // git rev-parse HEAD
+    GitDate   = "unknown"  // git log -1 --format=%ci
+    GitBranch = "unknown"  // git rev-parse --abbrev-ref HEAD
+    BuildDate = "unknown"  // build timestamp
+)
+```
+
+Logged at startup:
+```
+level=INFO msg="starting TgBot" git_commit=abc123 git_date="2026-02-04" git_branch=main ...
+```
 
 ### `internal/bot`
 

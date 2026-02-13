@@ -11,12 +11,23 @@ import (
 
 // Config holds all application configuration
 type Config struct {
+	// Telegram
 	TelegramToken string
+
+	// OpenAI
 	OpenAIKey     string
 	OpenAIModel   string
 	OpenAIBaseURL string
-	AllowedUsers  []int64
-	MaxHistory    int
+
+	// Access control
+	AllowedUsers []int64
+
+	// Session
+	MaxHistory int
+
+	// Logging
+	LogLevel  string // "debug", "info", "warn", "error"
+	LogFormat string // "text", "json"
 }
 
 // Load reads configuration from environment variables
@@ -30,6 +41,8 @@ func Load() (*Config, error) {
 		OpenAIModel:   getEnvOrDefault("OPENAI_MODEL", "gpt-4o"),
 		OpenAIBaseURL: getEnvOrDefault("OPENAI_BASE_URL", ""),
 		MaxHistory:    getEnvIntOrDefault("MAX_HISTORY", 20),
+		LogLevel:      getEnvOrDefault("LOG_LEVEL", "info"),
+		LogFormat:     getEnvOrDefault("LOG_FORMAT", "text"),
 	}
 
 	// Validate required fields

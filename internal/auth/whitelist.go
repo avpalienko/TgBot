@@ -1,25 +1,28 @@
 package auth
 
 import (
-	"log"
 	"sync"
+
+	"github.com/user/tgbot/internal/logger"
 )
 
 // Whitelist manages user access control
 type Whitelist struct {
 	mu      sync.RWMutex
 	allowed map[int64]bool
+	log     logger.Logger
 }
 
 // NewWhitelist creates a new whitelist with the given user IDs
-func NewWhitelist(userIDs []int64) *Whitelist {
+func NewWhitelist(userIDs []int64, log logger.Logger) *Whitelist {
 	w := &Whitelist{
 		allowed: make(map[int64]bool),
+		log:     log,
 	}
 	for _, id := range userIDs {
 		w.allowed[id] = true
 	}
-	log.Printf("[auth] Whitelist initialized with %d users", len(userIDs))
+	w.log.Info("whitelist initialized", "users_count", len(userIDs))
 	return w
 }
 
@@ -36,7 +39,7 @@ func (w *Whitelist) IsAllowed(userID int64) bool {
 
 	allowed := w.allowed[userID]
 	if !allowed {
-		log.Printf("[auth] Access denied for user %d", userID)
+		w.log.Warn("access denied", "user_id", userID)
 	}
 	return allowed
 }
@@ -46,7 +49,7 @@ func (w *Whitelist) Add(userID int64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.allowed[userID] = true
-	log.Printf("[auth] User %d added to whitelist", userID)
+	w.log.Info("user added to whitelist", "user_id", userID)
 }
 
 // Remove removes a user from the whitelist
@@ -54,7 +57,7 @@ func (w *Whitelist) Remove(userID int64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	delete(w.allowed, userID)
-	log.Printf("[auth] User %d removed from whitelist", userID)
+	w.log.Info("user removed from whitelist", "user_id", userID)
 }
 
 // Count returns the number of users in the whitelist

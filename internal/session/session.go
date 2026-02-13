@@ -1,6 +1,8 @@
 package session
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"sync"
 )
 
@@ -10,10 +12,16 @@ type Message struct {
 	Content string
 }
 
+// Session holds conversation data for a user
+type Session struct {
+	ID       string    // Unique session ID for log tracing
+	Messages []Message // Conversation history
+}
+
 // Manager handles conversation sessions for users
 type Manager struct {
 	mu         sync.RWMutex
-	sessions   map[int64][]Message
+	sessions   map[int64]*Session
 	maxHistory int
 }
 
@@ -23,9 +31,36 @@ func NewManager(maxHistory int) *Manager {
 		maxHistory = 20
 	}
 	return &Manager{
-		sessions:   make(map[int64][]Message),
+		sessions:   make(map[int64]*Session),
 		maxHistory: maxHistory,
 	}
+}
+
+// generateSessionID creates a unique session identifier
+func generateSessionID() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// getOrCreateSession returns existing session or creates a new one
+func (m *Manager) getOrCreateSession(userID int64) *Session {
+	if session, exists := m.sessions[userID]; exists {
+		return session
+	}
+	session := &Session{
+		ID:       generateSessionID(),
+		Messages: []Message{},
+	}
+	m.sessions[userID] = session
+	return session
+}
+
+// GetSessionID returns the session ID for a user (creates if not exists)
+func (m *Manager) GetSessionID(userID int64) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.getOrCreateSession(userID).ID
 }
 
 // Get returns the conversation history for a user
@@ -33,14 +68,14 @@ func (m *Manager) Get(userID int64) []Message {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	messages := m.sessions[userID]
-	if messages == nil {
+	session, exists := m.sessions[userID]
+	if !exists || session == nil {
 		return []Message{}
 	}
 
 	// Return a copy to avoid race conditions
-	result := make([]Message, len(messages))
-	copy(result, messages)
+	result := make([]Message, len(session.Messages))
+	copy(result, session.Messages)
 	return result
 }
 
@@ -49,24 +84,36 @@ func (m *Manager) Add(userID int64, messages ...Message) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.sessions[userID] = append(m.sessions[userID], messages...)
+	session := m.getOrCreateSession(userID)
+	session.Messages = append(session.Messages, messages...)
 
 	// Trim to max history (keep last N messages)
-	if len(m.sessions[userID]) > m.maxHistory {
-		m.sessions[userID] = m.sessions[userID][len(m.sessions[userID])-m.maxHistory:]
+	if len(session.Messages) > m.maxHistory {
+		session.Messages = session.Messages[len(session.Messages)-m.maxHistory:]
 	}
 }
 
-// Clear removes all messages for a user
-func (m *Manager) Clear(userID int64) {
+// Clear removes all messages for a user and generates new session ID
+func (m *Manager) Clear(userID int64) string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.sessions, userID)
+
+	newSessionID := generateSessionID()
+	m.sessions[userID] = &Session{
+		ID:       newSessionID,
+		Messages: []Message{},
+	}
+	return newSessionID
 }
 
 // Count returns the number of messages in user's history
 func (m *Manager) Count(userID int64) int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return len(m.sessions[userID])
+
+	session, exists := m.sessions[userID]
+	if !exists || session == nil {
+		return 0
+	}
+	return len(session.Messages)
 }

@@ -1,9 +1,13 @@
-# Build Linux binary from Windows with version info
-# Usage: .\scripts\build-linux.ps1
+# Build binary for current platform with version info
+# Usage: .\scripts\build.ps1 [-Output bot.exe]
+
+param(
+    [string]$Output = "bot.exe"
+)
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "Building for Linux amd64..." -ForegroundColor Cyan
+Write-Host "Building for current platform..." -ForegroundColor Cyan
 
 # Get git info
 $gitCommit = git rev-parse HEAD 2>$null
@@ -25,20 +29,9 @@ Write-Host "  Branch: $gitBranch" -ForegroundColor Gray
 $pkg = "github.com/user/tgbot/internal/version"
 $ldflags = "-s -w -X '$pkg.GitCommit=$gitCommit' -X '$pkg.GitDate=$gitDate' -X '$pkg.GitBranch=$gitBranch' -X '$pkg.BuildDate=$buildDate'"
 
-$env:GOOS = "linux"
-$env:GOARCH = "amd64"
-$env:CGO_ENABLED = "0"
+go build -ldflags $ldflags -o $Output ./cmd/bot
 
-try {
-    go build -ldflags $ldflags -o tgbot ./cmd/bot
-    
-    if (Test-Path "tgbot") {
-        $size = (Get-Item "tgbot").Length / 1MB
-        Write-Host "Build successful: tgbot ($([math]::Round($size, 2)) MB)" -ForegroundColor Green
-    }
-}
-finally {
-    Remove-Item Env:GOOS -ErrorAction SilentlyContinue
-    Remove-Item Env:GOARCH -ErrorAction SilentlyContinue
-    Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue
+if (Test-Path $Output) {
+    $size = (Get-Item $Output).Length / 1MB
+    Write-Host "Build successful: $Output ($([math]::Round($size, 2)) MB)" -ForegroundColor Green
 }

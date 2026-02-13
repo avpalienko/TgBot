@@ -176,20 +176,36 @@ sudo systemctl start tgbot
 
 ## Option B: Docker Image (Pre-built Container)
 
-Build Docker image on Windows, push to registry, pull and run on VPS.
+Build Docker image on Windows, push to GitHub Container Registry (ghcr.io), pull and run on VPS.
 No source code or build tools on VPS — just Docker.
+
+**Quick deploy with scripts:**
+```powershell
+# On Windows: build and push image to ghcr.io
+.\scripts\docker-push.ps1 -Username YOUR_GITHUB_USERNAME -Registry ghcr.io
+```
+```bash
+# On VPS: pull and (re)start container
+./deploy-docker.sh YOUR_GITHUB_USERNAME
+```
 
 ### Prerequisites
 
 - Docker Desktop installed on Windows
-- Docker Hub account (free) or private registry
+- GitHub account (ghcr.io is free for public repos)
 
-### Step 1: Setup Docker Hub (one time)
+### Step 1: Login to ghcr.io (one time)
 
+On Windows:
 ```powershell
-# Login to Docker Hub
-docker login
-# Enter your Docker Hub username and password
+# Create a Personal Access Token at https://github.com/settings/tokens
+# with "write:packages" scope, then login:
+docker login ghcr.io -u YOUR_GITHUB_USERNAME
+```
+
+On VPS (only needed for private repos):
+```bash
+docker login ghcr.io -u YOUR_GITHUB_USERNAME
 ```
 
 ### Step 2: Build and Push Image
@@ -197,16 +213,16 @@ docker login
 ```powershell
 cd D:\CMA\Work\GO\TgBot
 
-# Build image (replace YOUR_USERNAME with your Docker Hub username)
-docker build -t YOUR_USERNAME/tgbot:latest .
+# Build image
+docker build -t ghcr.io/YOUR_GITHUB_USERNAME/tgbot:latest .
 
-# Push to Docker Hub
-docker push YOUR_USERNAME/tgbot:latest
+# Push to ghcr.io
+docker push ghcr.io/YOUR_GITHUB_USERNAME/tgbot:latest
 ```
 
 Or use the script:
 ```powershell
-.\scripts\docker-push.ps1 -Username YOUR_USERNAME
+.\scripts\docker-push.ps1 -Username YOUR_GITHUB_USERNAME -Registry ghcr.io
 ```
 
 ### Step 3: Install Docker on VPS
@@ -223,12 +239,26 @@ sudo usermod -aG docker $USER
 exit
 ```
 
-### Step 4: Create .env on VPS
+### Step 4: Deploy on VPS
+
+Copy `scripts/deploy-docker.sh` to the VPS and run it:
 
 ```bash
 ssh user@your-vps-ip
 
-mkdir -p ~/tgbot
+# Copy the script (from Windows, one time)
+# scp scripts/deploy-docker.sh user@your-vps-ip:~/
+
+chmod +x ~/deploy-docker.sh
+./deploy-docker.sh YOUR_GITHUB_USERNAME
+```
+
+On first run the script will:
+1. Create `~/tgbot/.env` from a template
+2. Ask you to fill in the values and re-run
+
+Edit the config:
+```bash
 nano ~/tgbot/.env
 ```
 
@@ -240,23 +270,31 @@ OPENAI_MODEL=gpt-4o
 ALLOWED_USERS=your_user_id
 ```
 
-Secure it:
+Then re-run:
 ```bash
-chmod 600 ~/tgbot/.env
+./deploy-docker.sh YOUR_GITHUB_USERNAME
 ```
 
-### Step 5: Pull and Run
+The script pulls the image, stops the old container (if any), starts a new one with
+`--restart unless-stopped` and log rotation (`--log-opt max-size=10m --log-opt max-file=3`),
+and cleans up dangling images.
+
+### Step 5: Manual Pull and Run (alternative)
+
+If you prefer not to use the script:
 
 ```bash
 # Pull image
-docker pull YOUR_USERNAME/tgbot:latest
+docker pull ghcr.io/YOUR_GITHUB_USERNAME/tgbot:latest
 
 # Run container
 docker run -d \
     --name tgbot \
     --restart unless-stopped \
     --env-file ~/tgbot/.env \
-    YOUR_USERNAME/tgbot:latest
+    --log-opt max-size=10m \
+    --log-opt max-file=3 \
+    ghcr.io/YOUR_GITHUB_USERNAME/tgbot:latest
 
 # Check logs
 docker logs -f tgbot
@@ -266,39 +304,42 @@ docker logs -f tgbot
 
 On Windows:
 ```powershell
-docker build -t YOUR_USERNAME/tgbot:latest .
-docker push YOUR_USERNAME/tgbot:latest
+.\scripts\docker-push.ps1 -Username YOUR_GITHUB_USERNAME -Registry ghcr.io
 ```
 
-On VPS:
+On VPS (using the deploy script):
 ```bash
-docker pull YOUR_USERNAME/tgbot:latest
+./deploy-docker.sh YOUR_GITHUB_USERNAME
+```
+
+Or manually on VPS:
+```bash
+docker pull ghcr.io/YOUR_GITHUB_USERNAME/tgbot:latest
 docker rm -f tgbot
-docker run -d --name tgbot --restart unless-stopped --env-file ~/tgbot/.env YOUR_USERNAME/tgbot:latest
+docker run -d \
+    --name tgbot \
+    --restart unless-stopped \
+    --env-file ~/tgbot/.env \
+    --log-opt max-size=10m \
+    --log-opt max-file=3 \
+    ghcr.io/YOUR_GITHUB_USERNAME/tgbot:latest
 ```
 
-One-liner:
-```bash
-docker pull YOUR_USERNAME/tgbot:latest && docker rm -f tgbot && docker run -d --name tgbot --restart unless-stopped --env-file ~/tgbot/.env YOUR_USERNAME/tgbot:latest
-```
+### Using Docker Hub (alternative registry)
 
-### Using Private Registry
-
-GitHub Container Registry (ghcr.io):
+If you prefer Docker Hub over ghcr.io:
 
 ```powershell
 # Login
-docker login ghcr.io -u YOUR_GITHUB_USERNAME
+docker login
 
-# Build and push
-docker build -t ghcr.io/YOUR_GITHUB_USERNAME/tgbot:latest .
-docker push ghcr.io/YOUR_GITHUB_USERNAME/tgbot:latest
+# Build and push (no registry prefix = Docker Hub)
+.\scripts\docker-push.ps1 -Username YOUR_DOCKERHUB_USERNAME
 ```
 
 On VPS:
 ```bash
-docker login ghcr.io -u YOUR_GITHUB_USERNAME
-docker pull ghcr.io/YOUR_GITHUB_USERNAME/tgbot:latest
+docker pull YOUR_DOCKERHUB_USERNAME/tgbot:latest
 ```
 
 ---
@@ -474,6 +515,8 @@ docker rm -f tgbot               # Remove container
 | `OPENAI_BASE_URL` | No | - | Custom API URL |
 | `ALLOWED_USERS` | No | - | Comma-separated user IDs |
 | `MAX_HISTORY` | No | 20 | Max messages in context |
+| `LOG_LEVEL` | No | info | Logging level (debug/info/warn/error) |
+| `LOG_FORMAT` | No | text | Log format (text/json) |
 
 ### Getting Tokens
 
