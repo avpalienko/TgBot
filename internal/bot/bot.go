@@ -292,9 +292,10 @@ func downloadAndEncodeImage(url string) (string, error) {
 		return "", fmt.Errorf("failed to read image data: %w", err)
 	}
 
-	// Detect content type from response header, fallback to jpeg
-	contentType := resp.Header.Get("Content-Type")
-	if contentType == "" {
+	// Detect content type from file content (magic bytes), not from header
+	// Telegram often returns application/octet-stream which OpenAI rejects
+	contentType := http.DetectContentType(data)
+	if !strings.HasPrefix(contentType, "image/") {
 		contentType = "image/jpeg"
 	}
 
