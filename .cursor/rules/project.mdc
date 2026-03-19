@@ -8,7 +8,7 @@ alwaysApply: true
 
 ## What is this
 
-Telegram bot on Go for AI access via OpenAI API. Whitelist authorization, in-memory conversation context.
+Telegram bot on Go for AI access via OpenAI Responses API. Supports text chat, photo analysis, image generation, and image editing. Uses whitelist authorization and in-memory session state.
 
 ## Structure
 
@@ -17,30 +17,47 @@ cmd/bot/main.go          - entry point
 internal/
     config/config.go     - env vars loading
     bot/bot.go           - Telegram handlers
-    ai/openai.go         - OpenAI client
-    session/session.go   - conversation context (in-memory)
+    ai/provider.go       - AI provider contract
+    ai/openai.go         - OpenAI Responses API client
+    session/session.go   - conversation context, previous_response_id, latest image lookup
     auth/whitelist.go    - access control
 ```
 
 ## Key Dependencies
 
 - `github.com/go-telegram-bot-api/telegram-bot-api/v5` - Telegram
-- `github.com/sashabaranov/go-openai` - OpenAI
+- `github.com/openai/openai-go` - OpenAI Responses API
 - `github.com/joho/godotenv` - .env loading
 
 ## Configuration (env vars)
 
 - `TELEGRAM_BOT_TOKEN` - bot token
 - `OPENAI_API_KEY` - API key
-- `OPENAI_MODEL` - model (default: gpt-4o)
+- `OPENAI_MODEL` - Responses API model (default: gpt-4o)
+- `OPENAI_BASE_URL` - optional compatible API base URL
 - `ALLOWED_USERS` - whitelist user_id comma-separated
+- `MAX_HISTORY` - max stored messages in session
 
 ## Bot Commands
 
 - `/start` - welcome
 - `/new` - clear context
 - `/model` - current model
-- Text message -> AI response
+- `/help` - usage help
+
+## Image Workflows
+
+- Text message -> normal chat, image generation, or image editing based on routing
+- Photo message -> photo analysis or image editing based on caption intent
+- Reply-to-photo edit flow is supported
+- Explicit image prefixes:
+  - `img:` / `фото:` - force image mode
+  - `edit:` / `правь:` - force image edit mode
+  - `draw:` / `gen:` - force image generation mode
+- Supported image sizes:
+  - `1024x1024`
+  - `1024x1536`
+  - `1536x1024`
 
 ## Documentation
 
@@ -54,5 +71,5 @@ internal/
 - README.md always present in project root
 - Follow standard Go project structure (cmd/, internal/)
 - Secrets only via env vars, never in code
-- New AI providers via `ai.Provider` interface
+- New AI providers via `ai.Provider` interface and `Respond(ctx, ai.Request)`
 - Thread-safe access to shared state via mutex
