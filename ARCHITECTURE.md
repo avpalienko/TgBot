@@ -2,7 +2,7 @@
 
 ## Overview
 
-Telegram bot on Go providing access to AI via OpenAI-compatible API. Initially supports GPT-5, architecture allows easy addition of other providers.
+Telegram bot on Go providing access to AI through the OpenAI Responses API. The bot supports plain text chat, photo understanding, image generation, and image editing while keeping a lightweight in-memory session layer and explicit image-mode routing.
 
 ## Key Decisions
 
@@ -10,25 +10,25 @@ Telegram bot on Go providing access to AI via OpenAI-compatible API. Initially s
 |----------|--------|-----------|
 | Language | Go | Simple deployment (single binary), good performance, excellent libraries |
 | Telegram SDK | go-telegram-bot-api/v5 | Mature, actively maintained library |
-| OpenAI SDK | sashabaranov/go-openai | Full API support, including streaming |
+| OpenAI SDK | openai/openai-go | Native Responses API support and built-in hosted tools |
 | Authorization | Whitelist by user_id | Simple, reliable, no database required |
-| Conversation context | In-memory | Sufficient for MVP, easy to replace with persistent storage |
+| Conversation context | In-memory + `previous_response_id` + latest image lookup | Cheap continuity without a database |
 | Configuration | Env vars | Container standard, secrets security |
 
 ## Architecture
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Telegram  │────▶│   TgBot     │────▶│  OpenAI API │
-│   User      │◀────│   (Go)      │◀────│             │
-└─────────────┘     └─────────────┘     └─────────────┘
-                           │
-                    ┌──────┴──────┐
-                    │             │
-              ┌─────▼─────┐ ┌─────▼─────┐
-              │ Whitelist │ │  Session  │
-              │   Auth    │ │  Manager  │
-              └───────────┘ └───────────┘
+┌─────────────┐     ┌─────────────┐     ┌────────────────────┐
+│   Telegram  │────▶│   TgBot     │────▶│ OpenAI Responses   │
+│   User      │◀────│   (Go)      │◀────│ API + image tool   │
+└─────────────┘     └─────────────┘     └────────────────────┘
+                          │
+                   ┌──────┴──────┐
+                   │             │
+             ┌─────▼─────┐ ┌─────▼─────────────┐
+             │ Whitelist │ │ Session Manager   │
+             │   Auth    │ │ history + images  │
+             └───────────┘ └───────────────────┘
 ```
 
 ### Message Processing Flow
@@ -40,7 +40,7 @@ sequenceDiagram
     participant B as Bot
     participant A as Auth
     participant S as Session
-    participant AI as OpenAI
+    participant AI as Responses API
 
     U->>T: Message
     T->>B: Update
@@ -50,12 +50,17 @@ sequenceDiagram
         B-->>T: "Access denied"
     else In whitelist
         A-->>B: OK
-        B->>S: Get history
-        S-->>B: []Message
-        B->>AI: Chat Completion
-        AI-->>B: Response
-        B->>S: Save messages
-        B-->>T: AI response
+        B->>S: Load history + previous_response_id + latest image
+        alt Natural-language or explicit image routing
+            B->>B: Detect trigger / explicit prefix / optional size
+            B->>AI: Responses API + image_generation tool
+            AI-->>B: text +/or generated image + response.id
+        else Normal text or photo analysis
+            B->>AI: Responses API multimodal request
+            AI-->>B: text + response.id
+        end
+        B->>S: Save messages, response.id, latest image
+        B-->>T: Text and/or image reply
     end
     T-->>U: Response
 ```
@@ -120,7 +125,9 @@ Whitelist authorization:
 Conversation context management:
 - Stores history by user_id in `map[int64][]Message`
 - Thread-safe via `sync.RWMutex`
-- Methods: `Get`, `Add`, `Clear`
+- Stores `PreviousResponseID` for Responses API continuity
+- Can retrieve the latest image stored in the session
+- Methods: `Get`, `Add`, `Clear`, `GetPreviousResponseID`, `SetPreviousResponseID`, `GetLatestImage`
 - Automatic history depth limiting
 
 ### `internal/ai`
@@ -129,12 +136,32 @@ Provider interface and OpenAI implementation:
 
 ```go
 type Provider interface {
-    Complete(ctx context.Context, messages []Message) (string, error)
+    Respond(ctx context.Context, req Request) (Result, error)
     ModelName() string
 }
 ```
 
-Allows easy addition of Claude, Gemini, etc.
+`Request` includes:
+
+- request mode (`chat`, `generate_image`, `edit_image`)
+- text prompt
+- optional image size (`1024x1024`, `1024x1536`, `1536x1024`)
+- message history
+- input image data
+- `previous_response_id`
+
+`Result` includes:
+
+- text output
+- raw image bytes + mime type
+- response ID for multi-turn continuity
+
+The OpenAI provider uses `github.com/openai/openai-go` and sends all chat, vision, generation, and editing flows through the Responses API. Image generation and editing use the built-in `image_generation` tool with:
+
+- `gpt-image-1` as the hosted image model
+- `png` output
+- `auto` quality/background by default
+- user-selected image size when a supported `<width>x<height>` pattern is detected
 
 ### `internal/logger`
 
@@ -185,14 +212,68 @@ Telegram bot handlers:
 - `/new` - clear conversation context
 - `/model` - current model
 - `/help` - help
-- Text messages → AI request
+- Text messages → normal chat, image generation, or image editing based on natural-language triggers
+- Explicit image prefixes:
+  - `img:` / `фото:` - force image mode, edit latest image if available, otherwise generate
+  - `edit:` / `правь:` - force image edit mode
+  - `draw:` / `gen:` - force image generation mode
+- Photo messages → photo analysis or image editing based on caption intent
+- Reply-to-photo edit flow
+- Image size extraction from prompt via `<число>x<число>` with support for `x`, `X`, `х`, `Х`
+- Validation of supported image sizes before calling OpenAI
+- Routing logs that explicitly show when image mode was selected
+- Telegram photo upload for generated/edited images
+
+### Routing Rules
+
+Current routing in `internal/bot/bot.go`:
+
+1. Text message with explicit prefix:
+   - `draw:` / `gen:` -> generate image
+   - `edit:` / `правь:` -> edit replied/latest image
+   - `img:` / `фото:` -> edit replied/latest image, otherwise fallback to generation
+2. Reply to photo + edit-like text -> edit replied photo
+3. Natural-language generation trigger -> generate image
+4. Natural-language edit trigger + latest image in session -> edit latest image
+5. Uploaded photo + edit-like caption -> edit uploaded photo
+6. Otherwise:
+   - text -> normal chat
+   - photo -> photo analysis
+
+### Image Size Handling
+
+The bot parses image size directly from the user prompt before intent routing.
+
+Supported forms:
+
+- `1024x1024`
+- `1024X1536`
+- `1024х1536`
+- `1024Х1536`
+
+Supported values:
+
+- `1024x1024`
+- `1024x1536`
+- `1536x1024`
+
+Unsupported sizes are rejected in the bot layer with a user-friendly error instead of being passed through to OpenAI.
+
+### Session Image Semantics
+
+`GetLatestImage()` returns the latest image in session history regardless of role:
+
+- user-uploaded images
+- assistant-generated or assistant-edited images
+
+This enables iterative refinement of the last visual result, not just the last uploaded photo.
 
 ## Dependencies
 
 ```go
 require (
     github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
-    github.com/sashabaranov/go-openai v1.35.7
+    github.com/openai/openai-go v1.12.0
     github.com/joho/godotenv v1.5.1
 )
 ```
@@ -226,8 +307,8 @@ type MyProvider struct {
     model  string
 }
 
-func (p *MyProvider) Complete(ctx context.Context, messages []session.Message) (string, error) {
-    // Convert messages and call API
+func (p *MyProvider) Respond(ctx context.Context, req ai.Request) (ai.Result, error) {
+    // Convert Request and call provider API
 }
 
 func (p *MyProvider) ModelName() string {

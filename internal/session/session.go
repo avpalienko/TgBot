@@ -15,8 +15,9 @@ type Message struct {
 
 // Session holds conversation data for a user
 type Session struct {
-	ID       string    // Unique session ID for log tracing
-	Messages []Message // Conversation history
+	ID                 string    // Unique session ID for log tracing
+	Messages           []Message // Conversation history
+	PreviousResponseID string
 }
 
 // Manager handles conversation sessions for users
@@ -94,6 +95,47 @@ func (m *Manager) Add(userID int64, messages ...Message) {
 	}
 }
 
+// GetPreviousResponseID returns the latest stored Responses API response ID.
+func (m *Manager) GetPreviousResponseID(userID int64) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	session, exists := m.sessions[userID]
+	if !exists || session == nil {
+		return ""
+	}
+
+	return session.PreviousResponseID
+}
+
+// SetPreviousResponseID updates the latest stored Responses API response ID.
+func (m *Manager) SetPreviousResponseID(userID int64, responseID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	session := m.getOrCreateSession(userID)
+	session.PreviousResponseID = responseID
+}
+
+// GetLatestImage returns the most recent image stored in the session.
+func (m *Manager) GetLatestImage(userID int64) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	session, exists := m.sessions[userID]
+	if !exists || session == nil {
+		return ""
+	}
+
+	for i := len(session.Messages) - 1; i >= 0; i-- {
+		if session.Messages[i].ImageData != "" {
+			return session.Messages[i].ImageData
+		}
+	}
+
+	return ""
+}
+
 // Clear removes all messages for a user and generates new session ID
 func (m *Manager) Clear(userID int64) string {
 	m.mu.Lock()
@@ -101,8 +143,9 @@ func (m *Manager) Clear(userID int64) string {
 
 	newSessionID := generateSessionID()
 	m.sessions[userID] = &Session{
-		ID:       newSessionID,
-		Messages: []Message{},
+		ID:                 newSessionID,
+		Messages:           []Message{},
+		PreviousResponseID: "",
 	}
 	return newSessionID
 }

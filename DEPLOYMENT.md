@@ -2,6 +2,16 @@
 
 Step-by-step guide for building and deploying TgBot to Ubuntu VPS via SSH from Windows.
 
+## Compatibility Notes
+
+The bot now uses:
+
+- `github.com/openai/openai-go`
+- OpenAI `Responses API`
+- hosted `image_generation` tool for image generation and editing
+
+If you set `OPENAI_BASE_URL`, make sure the target provider supports the Responses API and hosted image-generation tool calls. Plain chat-compatible endpoints are not enough for the new image workflows.
+
 ## Deployment Options
 
 | Option | Build Location | VPS Requirements | Best For |
@@ -511,12 +521,18 @@ docker rm -f tgbot               # Remove container
 |----------|----------|---------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Yes | - | Bot token from @BotFather |
 | `OPENAI_API_KEY` | Yes | - | OpenAI API key |
-| `OPENAI_MODEL` | No | gpt-4o | Model name |
-| `OPENAI_BASE_URL` | No | - | Custom API URL |
+| `OPENAI_MODEL` | No | gpt-4o | Responses API model for chat, reasoning, and tool orchestration |
+| `OPENAI_BASE_URL` | No | - | Custom OpenAI-compatible base URL with Responses API support |
 | `ALLOWED_USERS` | No | - | Comma-separated user IDs |
 | `MAX_HISTORY` | No | 20 | Max messages in context |
 | `LOG_LEVEL` | No | info | Logging level (debug/info/warn/error) |
 | `LOG_FORMAT` | No | text | Log format (text/json) |
+
+### Model Guidance
+
+- Keep `OPENAI_MODEL` user-controlled.
+- Use a model that supports the Responses API.
+- Image generation/editing is executed through the Responses API `image_generation` tool and currently relies on `gpt-image-1` under the hood.
 
 ### Getting Tokens
 
