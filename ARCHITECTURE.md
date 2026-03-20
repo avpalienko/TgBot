@@ -76,7 +76,10 @@ TgBot/
 │   ├── config/
 │   │   └── config.go            # Configuration loading from env
 │   ├── bot/
-│   │   └── bot.go               # Telegram handlers, command routing
+│   │   ├── bot.go               # Bot struct, Run loop, command dispatch
+│   │   ├── handlers.go          # Text/photo message handling, AI dispatch
+│   │   ├── routing.go           # Image prefix parsing, intent matchers, size extraction
+│   │   └── send.go              # Telegram send helpers, photo download/encode
 │   ├── ai/
 │   │   ├── provider.go          # AI provider interface
 │   │   └── openai.go            # OpenAI implementation
@@ -90,9 +93,14 @@ TgBot/
 │       └── version.go           # Build version info (git commit, date)
 ├── scripts/
 │   ├── build.ps1                # Build for current platform with version
+│   ├── build.bat                # Same as build.ps1 for cmd.exe
 │   ├── build-linux.ps1          # Cross-compile for Linux with version
+│   ├── build-linux.bat          # Same as build-linux.ps1 for cmd.exe
 │   ├── deploy.ps1               # Deploy binary to VPS
-│   └── docker-push.ps1          # Build and push Docker image
+│   ├── deploy.bat               # Same as deploy.ps1 for cmd.exe
+│   ├── docker-push.ps1          # Build and push Docker image
+│   ├── docker-push.bat          # Same as docker-push.ps1 for cmd.exe
+│   └── deploy-docker.sh         # Pull and run Docker container on VPS
 ├── .env.example                 # Configuration example
 ├── Dockerfile                   # Multi-stage build
 ├── docker-compose.yml           # For local development
@@ -112,6 +120,9 @@ Loads configuration from environment variables:
 - `OPENAI_BASE_URL` - API base URL (for compatible providers)
 - `ALLOWED_USERS` - comma-separated list of allowed user_id
 - `MAX_HISTORY` - max messages in context (default: 20)
+- `MAX_CONCURRENCY` - max concurrent message handlers (default: 20)
+- `LOG_LEVEL` - logging level: debug, info, warn, error (default: info)
+- `LOG_FORMAT` - log format: text, json (default: text)
 
 ### `internal/auth`
 
@@ -123,11 +134,13 @@ Whitelist authorization:
 ### `internal/session`
 
 Conversation context management:
-- Stores history by user_id in `map[int64][]Message`
+- Stores history by user_id in `map[int64]*Session`
 - Thread-safe via `sync.RWMutex`
 - Stores `PreviousResponseID` for Responses API continuity
 - Can retrieve the latest image stored in the session
-- Methods: `Get`, `Add`, `Clear`, `GetPreviousResponseID`, `SetPreviousResponseID`, `GetLatestImage`
+- Methods: `GetSessionID`, `Get`, `AddWithResponseID`, `GetPreviousResponseID`, `GetLatestImage`, `Clear`
+- `AddWithResponseID` appends messages and updates `PreviousResponseID` in a single lock acquisition
+- `Clear` returns a new session ID for log tracing
 - Automatic history depth limiting
 
 ### `internal/ai`
@@ -207,14 +220,27 @@ level=INFO msg="starting TgBot" git_commit=abc123 git_date="2026-02-04" git_bran
 
 ### `internal/bot`
 
-Telegram bot handlers:
+Split into four files:
+- `bot.go` - Bot struct, `New`, `Run` loop, command dispatch, per-user mutex
+- `handlers.go` - text/photo message handling, AI dispatch helpers
+- `routing.go` - explicit prefix parsing, natural-language intent matchers, image size extraction
+- `send.go` - Telegram send helpers (text, long text, photo), photo download/encode
+
+Concurrency model:
+- Semaphore (`chan struct{}`) limits concurrent handlers to `MAX_CONCURRENCY`
+- Per-user `sync.Mutex` (via `sync.Map`) serializes session access per user
+- `sync.WaitGroup` for graceful shutdown on context cancellation
+
+Commands:
 - `/start` - welcome message
 - `/new` - clear conversation context
 - `/model` - current model
 - `/help` - help
+
+Message handling:
 - Text messages → normal chat, image generation, or image editing based on natural-language triggers
 - Explicit image prefixes:
-  - `img:` / `фото:` - force image mode, edit latest image if available, otherwise generate
+  - `img:` / `image:` / `фото:` - force image mode, edit latest image if available, otherwise generate
   - `edit:` / `правь:` - force image edit mode
   - `draw:` / `gen:` - force image generation mode
 - Photo messages → photo analysis or image editing based on caption intent
@@ -226,12 +252,12 @@ Telegram bot handlers:
 
 ### Routing Rules
 
-Current routing in `internal/bot/bot.go`:
+Current routing in `internal/bot/routing.go` and `internal/bot/handlers.go`:
 
 1. Text message with explicit prefix:
    - `draw:` / `gen:` -> generate image
    - `edit:` / `правь:` -> edit replied/latest image
-   - `img:` / `фото:` -> edit replied/latest image, otherwise fallback to generation
+   - `img:` / `image:` / `фото:` -> edit replied/latest image, otherwise fallback to generation
 2. Reply to photo + edit-like text -> edit replied photo
 3. Natural-language generation trigger -> generate image
 4. Natural-language edit trigger + latest image in session -> edit latest image

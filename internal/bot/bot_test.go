@@ -335,3 +335,208 @@ func TestIsSupportedImageSize(t *testing.T) {
 		})
 	}
 }
+
+func TestLooksLikeImageGeneration(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{name: "russian draw prefix", text: "нарисуй кота", want: true},
+		{name: "english draw prefix", text: "draw me a cat", want: true},
+		{name: "generate image", text: "generate image of sunset", want: true},
+		{name: "create image", text: "create an image of mountains", want: true},
+		{name: "plain text about drawing", text: "расскажи о рисовании", want: false},
+		{name: "normal question", text: "what is the capital of France", want: false},
+		{name: "empty string", text: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := looksLikeImageGeneration(tt.text); got != tt.want {
+				t.Fatalf("looksLikeImageGeneration(%q) = %v, want %v", tt.text, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLooksLikeImageEdit(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{name: "russian edit prefix", text: "отредактируй фон", want: true},
+		{name: "english remove", text: "remove background", want: true},
+		{name: "english add", text: "add shadow to the image", want: true},
+		{name: "change background", text: "change the background to blue", want: true},
+		{name: "plain text", text: "tell me about editing", want: false},
+		{name: "empty string", text: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := looksLikeImageEdit(tt.text); got != tt.want {
+				t.Fatalf("looksLikeImageEdit(%q) = %v, want %v", tt.text, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsReplyToPhoto(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil ReplyToMessage", func(t *testing.T) {
+		t.Parallel()
+		msg := &tgbotapi.Message{ReplyToMessage: nil}
+		if isReplyToPhoto(msg) {
+			t.Fatalf("expected false for nil ReplyToMessage")
+		}
+	})
+
+	t.Run("empty Photo slice", func(t *testing.T) {
+		t.Parallel()
+		msg := &tgbotapi.Message{
+			ReplyToMessage: &tgbotapi.Message{Photo: nil},
+		}
+		if isReplyToPhoto(msg) {
+			t.Fatalf("expected false for empty Photo slice")
+		}
+	})
+
+	t.Run("non-empty Photo slice", func(t *testing.T) {
+		t.Parallel()
+		msg := &tgbotapi.Message{
+			ReplyToMessage: &tgbotapi.Message{
+				Photo: []tgbotapi.PhotoSize{{FileID: "abc", Width: 100, Height: 100}},
+			},
+		}
+		if !isReplyToPhoto(msg) {
+			t.Fatalf("expected true for non-empty Photo slice")
+		}
+	})
+}
+
+func TestTextMatcherExcludes(t *testing.T) {
+	t.Parallel()
+
+	m := textMatcher{
+		excludes: []string{"пример", "объясн"},
+		phrases:  []string{"добавь ему"},
+	}
+
+	t.Run("match without exclude", func(t *testing.T) {
+		t.Parallel()
+		if !m.matches("добавь ему очки") {
+			t.Fatalf("expected match")
+		}
+	})
+
+	t.Run("exclude blocks match", func(t *testing.T) {
+		t.Parallel()
+		if m.matches("добавь ему пример") {
+			t.Fatalf("expected exclude to block match")
+		}
+	})
+
+	t.Run("another exclude blocks match", func(t *testing.T) {
+		t.Parallel()
+		if m.matches("объясни и добавь ему") {
+			t.Fatalf("expected exclude to block match")
+		}
+	})
+}
+
+func TestEncodeImageDataURI(t *testing.T) {
+	t.Parallel()
+
+	t.Run("correct format", func(t *testing.T) {
+		t.Parallel()
+		data := []byte{0x89, 0x50, 0x4E, 0x47}
+		got := encodeImageDataURI("image/png", data)
+		if !strings.HasPrefix(got, "data:image/png;base64,") {
+			t.Fatalf("expected data URI prefix, got %q", got[:40])
+		}
+	})
+
+	t.Run("default mime type fallback", func(t *testing.T) {
+		t.Parallel()
+		got := encodeImageDataURI("", []byte{1, 2, 3})
+		if !strings.HasPrefix(got, "data:image/png;base64,") {
+			t.Fatalf("expected default image/png, got %q", got[:30])
+		}
+	})
+}
+
+func TestFilenameForMimeType(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		mimeType string
+		want     string
+	}{
+		{"image/jpeg", "image.jpg"},
+		{"image/webp", "image.webp"},
+		{"image/png", "image.png"},
+		{"image/gif", "image.png"},
+		{"", "image.png"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.mimeType, func(t *testing.T) {
+			t.Parallel()
+			if got := filenameForMimeType(tt.mimeType); got != tt.want {
+				t.Fatalf("filenameForMimeType(%q) = %q, want %q", tt.mimeType, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDownloadAndEncodeImage(t *testing.T) {
+	t.Parallel()
+
+	imageBytes := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(imageBytes)
+	}))
+	defer server.Close()
+
+	ctx := t.Context()
+	dataURI, err := downloadAndEncodeImage(ctx, server.URL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.HasPrefix(dataURI, "data:image/") {
+		t.Fatalf("expected data URI with image mime type, got %q", dataURI[:30])
+	}
+	if !strings.Contains(dataURI, ";base64,") {
+		t.Fatalf("expected base64 encoding in data URI")
+	}
+}
+
+func TestDownloadAndEncodeImageError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	ctx := t.Context()
+	_, err := downloadAndEncodeImage(ctx, server.URL)
+	if err == nil {
+		t.Fatalf("expected error for 404 response")
+	}
+}

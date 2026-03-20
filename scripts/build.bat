@@ -21,6 +21,16 @@ echo   Commit: %GIT_COMMIT%
 echo   Date:   %GIT_DATE%
 echo   Branch: %GIT_BRANCH%
 
+:: Run tests
+echo.
+echo Running tests...
+go test ./internal/... -count=1
+if errorlevel 1 (
+    echo Tests failed, aborting build
+    exit /b 1
+)
+echo Tests passed
+
 :: Build with proper quoting
 set PKG=github.com/user/tgbot/internal/version
 

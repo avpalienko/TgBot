@@ -525,6 +525,7 @@ docker rm -f tgbot               # Remove container
 | `OPENAI_BASE_URL` | No | - | Custom OpenAI-compatible base URL with Responses API support |
 | `ALLOWED_USERS` | No | - | Comma-separated user IDs |
 | `MAX_HISTORY` | No | 20 | Max messages in context |
+| `MAX_CONCURRENCY` | No | 20 | Max concurrent message handlers |
 | `LOG_LEVEL` | No | info | Logging level (debug/info/warn/error) |
 | `LOG_FORMAT` | No | text | Log format (text/json) |
 
