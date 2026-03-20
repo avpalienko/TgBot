@@ -1,10 +1,13 @@
 package ai
 
-import (
-	"context"
+import "context"
 
-	"github.com/user/tgbot/internal/session"
-)
+// Message represents a chat message at the AI provider boundary.
+type Message struct {
+	Role      string // "user" or "assistant"
+	Content   string
+	ImageData string // optional: base64 data URI for images
+}
 
 type RequestMode string
 
@@ -18,7 +21,7 @@ type Request struct {
 	Mode               RequestMode
 	Text               string
 	ImageSize          string
-	History            []session.Message
+	History            []Message
 	InputImageData     string
 	PreviousResponseID string
 }

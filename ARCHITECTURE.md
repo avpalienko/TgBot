@@ -69,38 +69,37 @@ sequenceDiagram
 
 ```
 TgBot/
+├── .github/
+│   └── workflows/
+│       └── ci.yml               # CI pipeline: lint + test + coverage gate
 ├── cmd/
 │   └── bot/
 │       └── main.go              # Entry point, component initialization
 ├── internal/
-│   ├── config/
-│   │   └── config.go            # Configuration loading from env
-│   ├── bot/
-│   │   ├── bot.go               # Bot struct, Run loop, command dispatch
-│   │   ├── handlers.go          # Text/photo message handling, AI dispatch
-│   │   ├── routing.go           # Image prefix parsing, intent matchers, size extraction
-│   │   └── send.go              # Telegram send helpers, photo download/encode
 │   ├── ai/
-│   │   ├── provider.go          # AI provider interface
-│   │   └── openai.go            # OpenAI implementation
-│   ├── session/
-│   │   └── session.go           # In-memory conversation context storage
+│   │   ├── provider.go          # AI provider interface and Message type
+│   │   ├── openai.go            # OpenAI implementation
+│   │   └── errors.go            # Structured AI error types and classification
 │   ├── auth/
 │   │   └── whitelist.go         # Access control by user_id
+│   ├── bot/
+│   │   ├── bot.go               # Bot struct, Run loop, command dispatch
+│   │   └── handlers.go          # Text/photo message handling, AI dispatch
+│   ├── config/
+│   │   └── config.go            # Configuration loading from env
 │   ├── logger/
 │   │   └── logger.go            # Logging abstraction (slog implementation)
+│   ├── routing/
+│   │   └── routing.go           # Image prefix parsing, intent matchers, size extraction
+│   ├── session/
+│   │   └── session.go           # In-memory conversation context storage
+│   ├── telegram/
+│   │   └── client.go            # Telegram send helpers, photo download/encode
 │   └── version/
 │       └── version.go           # Build version info (git commit, date)
 ├── scripts/
-│   ├── build.ps1                # Build for current platform with version
-│   ├── build.bat                # Same as build.ps1 for cmd.exe
-│   ├── build-linux.ps1          # Cross-compile for Linux with version
-│   ├── build-linux.bat          # Same as build-linux.ps1 for cmd.exe
-│   ├── deploy.ps1               # Deploy binary to VPS
-│   ├── deploy.bat               # Same as deploy.ps1 for cmd.exe
-│   ├── docker-push.ps1          # Build and push Docker image
-│   ├── docker-push.bat          # Same as docker-push.ps1 for cmd.exe
 │   └── deploy-docker.sh         # Pull and run Docker container on VPS
+├── Makefile                     # Build, test, lint, fmt, cover, docker targets
 ├── .env.example                 # Configuration example
 ├── Dockerfile                   # Multi-stage build
 ├── docker-compose.yml           # For local development
@@ -118,9 +117,13 @@ Loads configuration from environment variables:
 - `OPENAI_API_KEY` - OpenAI API key
 - `OPENAI_MODEL` - model (default: gpt-4o)
 - `OPENAI_BASE_URL` - API base URL (for compatible providers)
+- `OPENAI_MAX_RETRIES` - max automatic retries for transient API errors (default: 3)
 - `ALLOWED_USERS` - comma-separated list of allowed user_id
 - `MAX_HISTORY` - max messages in context (default: 20)
+- `SESSION_TTL` - idle session lifetime, Go duration (default: 24h)
 - `MAX_CONCURRENCY` - max concurrent message handlers (default: 20)
+- `REQUEST_TIMEOUT` - per-request timeout, Go duration (default: 60s)
+- `MAX_PROMPT_LENGTH` - max prompt length in characters (default: 4000)
 - `LOG_LEVEL` - logging level: debug, info, warn, error (default: info)
 - `LOG_FORMAT` - log format: text, json (default: text)
 
@@ -135,13 +138,14 @@ Whitelist authorization:
 
 Conversation context management:
 - Stores history by user_id in `map[int64]*Session`
-- Thread-safe via `sync.RWMutex`
+- Thread-safe via `sync.RWMutex`; most methods acquire write locks to update `LastActivity` on every access
 - Stores `PreviousResponseID` for Responses API continuity
 - Can retrieve the latest image stored in the session
-- Methods: `GetSessionID`, `Get`, `AddWithResponseID`, `GetPreviousResponseID`, `GetLatestImage`, `Clear`
+- Methods: `GetSessionID`, `Get`, `AddWithResponseID`, `GetPreviousResponseID`, `GetLatestImage`, `Clear`, `SessionCount`, `StartCleanup`
 - `AddWithResponseID` appends messages and updates `PreviousResponseID` in a single lock acquisition
 - `Clear` returns a new session ID for log tracing
 - Automatic history depth limiting
+- TTL-based session eviction: each session tracks `LastActivity`; a background goroutine (`StartCleanup`) periodically removes sessions idle longer than `SESSION_TTL`
 
 ### `internal/ai`
 
@@ -169,12 +173,24 @@ type Provider interface {
 - raw image bytes + mime type
 - response ID for multi-turn continuity
 
+The `ai` package defines its own `ai.Message` type (independent of `session.Message`), so it does not import the `session` package. Conversion between `session.Message` and `ai.Message` happens in `internal/bot/handlers.go`.
+
 The OpenAI provider uses `github.com/openai/openai-go` and sends all chat, vision, generation, and editing flows through the Responses API. Image generation and editing use the built-in `image_generation` tool with:
 
 - `gpt-image-1` as the hosted image model
 - `png` output
 - `auto` quality/background by default
 - user-selected image size when a supported `<width>x<height>` pattern is detected
+
+#### Error Classification (`errors.go`)
+
+Structured error handling for upstream API errors:
+
+- `AIError` wraps an API error with a classified `ErrorKind`
+- `ErrorKind` enum: `ErrTransient` (5xx, 408, 409), `ErrRateLimit` (429), `ErrAuth` (401/403), `ErrBadRequest` (400), `ErrUnknown`
+- `classifyError()` inspects `openai.Error` and wraps it as `*AIError` with the appropriate kind
+- Predicate functions: `IsRateLimit(err)`, `IsAuth(err)`, `IsTransient(err)`, `IsBadRequest(err)`
+- Non-SDK errors (network/connection) are classified as `ErrTransient` by default
 
 ### `internal/logger`
 
@@ -220,11 +236,13 @@ level=INFO msg="starting TgBot" git_commit=abc123 git_date="2026-02-04" git_bran
 
 ### `internal/bot`
 
-Split into four files:
+Split into two files:
 - `bot.go` - Bot struct, `New`, `Run` loop, command dispatch, per-user mutex
-- `handlers.go` - text/photo message handling, AI dispatch helpers
-- `routing.go` - explicit prefix parsing, natural-language intent matchers, image size extraction
-- `send.go` - Telegram send helpers (text, long text, photo), photo download/encode
+- `handlers.go` - text/photo message handling, AI dispatch helpers, `session.Message` ↔ `ai.Message` conversion
+
+Uses `internal/routing` for image intent detection and prefix parsing, and `internal/telegram` for Telegram API interaction (sending messages, downloading photos).
+
+Per-request timeouts are applied via `context.WithTimeout` using the configured `REQUEST_TIMEOUT`. Prompt length is validated against `MAX_PROMPT_LENGTH` before dispatching to the AI provider.
 
 Concurrency model:
 - Semaphore (`chan struct{}`) limits concurrent handlers to `MAX_CONCURRENCY`
@@ -250,9 +268,37 @@ Message handling:
 - Routing logs that explicitly show when image mode was selected
 - Telegram photo upload for generated/edited images
 
+### `internal/routing`
+
+Image prefix parsing, natural-language intent matchers, and image size extraction. Extracted from the former `internal/bot/routing.go` into its own package so it can be used and tested independently.
+
+Key functions:
+- `ExtractImageSize(text)` - parses `<width>x<height>` patterns from text, returns cleaned text and size string
+- `IsSupportedImageSize(size)` - validates against supported sizes (`1024x1024`, `1024x1536`, `1536x1024`)
+- `ParseExplicitImageCommand(text)` - detects explicit prefixes (`img:`, `image:`, `фото:`, `edit:`, `правь:`, `draw:`, `gen:`) and returns the mode and prompt
+- `LooksLikeImageGeneration(text)` - natural-language detection for image generation intent
+- `LooksLikeImageEdit(text)` - natural-language detection for image edit intent
+- `LooksLikeExplicitImageEdit(text)` - detects explicit references to editing "the image" / "the photo"
+- `IsReplyToPhoto(msg)` - checks if a message is a reply to a photo
+
+Intent matchers use `guardedPrefixes` with `rejectSuffixes` to reduce false positives on ambiguous verbs like "draw", "generate", "edit", "remove", "add", "change", "make it", "turn it", "render", "illustrate", and "replace".
+
+### `internal/telegram`
+
+Telegram send helpers and photo download/encoding. Extracted from the former `internal/bot/send.go` into its own package. Wraps `tgbotapi.BotAPI` via a `Client` struct.
+
+Key functions:
+- `SendText(chatID, text)` - sends a text message
+- `SendLongText(chatID, text)` - splits text exceeding 4000 runes into multiple messages at natural boundaries
+- `SendPhoto(chatID, imageBytes, mimeType, caption)` - sends a photo with optional caption (respects Telegram's 1024 UTF-16 unit caption limit)
+- `SendChatAction(chatID, action)` - sends a chat action (e.g. "typing", "upload_photo")
+- `DownloadPhoto(ctx, photos)` - downloads the highest-resolution photo and returns a base64 data URI
+- `DownloadAndEncodeImage(ctx, url)` - downloads an image from URL and encodes as base64 data URI with auto-detected MIME type
+- `EncodeImageDataURI(mimeType, data)` - encodes raw image bytes as a base64 data URI
+
 ### Routing Rules
 
-Current routing in `internal/bot/routing.go` and `internal/bot/handlers.go`:
+Current routing in `internal/routing/routing.go` and `internal/bot/handlers.go`:
 
 1. Text message with explicit prefix:
    - `draw:` / `gen:` -> generate image
@@ -304,21 +350,36 @@ require (
 )
 ```
 
-## Quick Start
+## Build & Development
+
+All build, test, and Docker workflows are managed through the `Makefile`:
 
 ```bash
-# Install dependencies
-go mod download
-
-# Create .env from example
-cp .env.example .env
-# Edit .env with your tokens
-
-# Run
-go run ./cmd/bot
+make help           # Show all available targets
+make build          # Build binary for current platform (with version ldflags)
+make build-linux    # Cross-compile for linux/amd64
+make test           # Run tests with -race
+make lint           # go vet + golangci-lint
+make fmt            # Format code (gofmt -s -w)
+make cover          # Tests + coverage report (HTML + 60% threshold gate)
+make docker-build   # Build Docker image (requires DOCKER_USER)
+make docker-push    # Build and push Docker image (requires DOCKER_USER)
+make clean          # Remove build artifacts
 ```
 
-For detailed build and deployment instructions, see **[DEPLOYMENT.md](DEPLOYMENT.md)**.
+CI pipeline (`.github/workflows/ci.yml`) runs on push and pull requests to `main`/`master`:
+- **Lint** job: `go vet` + `golangci-lint`
+- **Test** job: tests with `-race`, coverage report, 60% coverage threshold gate
+
+Quick start:
+
+```bash
+cp .env.example .env   # Create config, fill in tokens
+make build             # Build binary
+./tgbot                # Run
+```
+
+For detailed deployment instructions, see **[DEPLOYMENT.md](DEPLOYMENT.md)**.
 
 ## Extension
 

@@ -27,40 +27,13 @@ If you set `OPENAI_BASE_URL`, make sure the target provider supports the Respons
 
 Build on Windows, deploy only the compiled binary. No Go or Docker needed on VPS.
 
-**Quick deploy with scripts:**
-```powershell
-# First time: full setup (see steps below)
-# Updates: just run
-.\scripts\deploy.ps1 -VpsHost user@your-vps-ip
+### Step 1: Cross-Compile for Linux
+
+```bash
+make build-linux
 ```
 
-### Step 1: Cross-Compile on Windows
-
-Open PowerShell in project directory:
-
-```powershell
-cd D:\CMA\Work\GO\TgBot
-
-# Set environment for Linux build
-$env:GOOS = "linux"
-$env:GOARCH = "amd64"
-$env:CGO_ENABLED = "0"
-
-# Build static binary
-go build -ldflags="-s -w" -o tgbot ./cmd/bot
-
-# Reset environment
-Remove-Item Env:GOOS
-Remove-Item Env:GOARCH
-Remove-Item Env:CGO_ENABLED
-```
-
-This creates `tgbot` file (~8 MB) — a static Linux binary.
-
-Or use the script:
-```powershell
-.\scripts\build-linux.ps1
-```
+This creates `tgbot` file (~8 MB) — a static Linux binary with version info embedded via ldflags.
 
 ### Step 2: Copy Binary to VPS
 
@@ -161,15 +134,9 @@ sudo journalctl -u tgbot -f
 
 ### Updating (Option A)
 
-On Windows:
-```powershell
-.\scripts\deploy.ps1 -VpsHost user@your-vps-ip
-```
-
-Or manually:
-```powershell
-$env:GOOS = "linux"; $env:GOARCH = "amd64"; $env:CGO_ENABLED = "0"
-go build -ldflags="-s -w" -o tgbot ./cmd/bot
+Build and copy:
+```bash
+make build-linux
 scp tgbot user@your-vps-ip:~/
 ```
 
@@ -189,10 +156,10 @@ sudo systemctl start tgbot
 Build Docker image on Windows, push to GitHub Container Registry (ghcr.io), pull and run on VPS.
 No source code or build tools on VPS — just Docker.
 
-**Quick deploy with scripts:**
-```powershell
-# On Windows: build and push image to ghcr.io
-.\scripts\docker-push.ps1 -Username YOUR_GITHUB_USERNAME -Registry ghcr.io
+**Quick deploy:**
+```bash
+# Build and push image to registry
+make docker-push DOCKER_USER=YOUR_GITHUB_USERNAME
 ```
 ```bash
 # On VPS: pull and (re)start container
@@ -220,19 +187,13 @@ docker login ghcr.io -u YOUR_GITHUB_USERNAME
 
 ### Step 2: Build and Push Image
 
-```powershell
-cd D:\CMA\Work\GO\TgBot
-
-# Build image
-docker build -t ghcr.io/YOUR_GITHUB_USERNAME/tgbot:latest .
-
-# Push to ghcr.io
-docker push ghcr.io/YOUR_GITHUB_USERNAME/tgbot:latest
+```bash
+make docker-push DOCKER_USER=YOUR_GITHUB_USERNAME
 ```
 
-Or use the script:
-```powershell
-.\scripts\docker-push.ps1 -Username YOUR_GITHUB_USERNAME -Registry ghcr.io
+Or with a custom tag:
+```bash
+make docker-push DOCKER_USER=YOUR_GITHUB_USERNAME DOCKER_TAG=v1.0.0
 ```
 
 ### Step 3: Install Docker on VPS
@@ -312,9 +273,9 @@ docker logs -f tgbot
 
 ### Updating (Option B)
 
-On Windows:
-```powershell
-.\scripts\docker-push.ps1 -Username YOUR_GITHUB_USERNAME -Registry ghcr.io
+Build and push:
+```bash
+make docker-push DOCKER_USER=YOUR_GITHUB_USERNAME
 ```
 
 On VPS (using the deploy script):
@@ -339,12 +300,9 @@ docker run -d \
 
 If you prefer Docker Hub over ghcr.io:
 
-```powershell
-# Login
+```bash
 docker login
-
-# Build and push (no registry prefix = Docker Hub)
-.\scripts\docker-push.ps1 -Username YOUR_DOCKERHUB_USERNAME
+make docker-push DOCKER_USER=YOUR_DOCKERHUB_USERNAME
 ```
 
 On VPS:
@@ -371,9 +329,8 @@ exit
 
 ### Step 2: Copy Project to VPS
 
-From Windows:
-```powershell
-cd D:\CMA\Work\GO\TgBot
+From local machine:
+```bash
 tar -czvf tgbot.tar.gz --exclude=".env" --exclude=".git" .
 scp tgbot.tar.gz user@your-vps-ip:~/
 ```
@@ -397,7 +354,10 @@ Add configuration and save.
 ### Step 4: Build and Run
 
 ```bash
-docker build -t tgbot .
+make docker-build DOCKER_USER=local
+
+# Or directly:
+# docker build -t tgbot .
 
 docker run -d \
     --name tgbot \
@@ -441,9 +401,8 @@ go version
 
 ### Step 2: Copy and Build
 
-From Windows:
-```powershell
-cd D:\CMA\Work\GO\TgBot
+From local machine:
+```bash
 tar -czvf tgbot.tar.gz --exclude=".env" --exclude=".git" .
 scp tgbot.tar.gz user@your-vps-ip:~/
 ```
@@ -454,10 +413,10 @@ mkdir -p ~/tgbot-src
 cd ~/tgbot-src
 tar -xzvf ~/tgbot.tar.gz
 
-go build -o bot ./cmd/bot
+make build
 
 sudo mkdir -p /opt/tgbot
-sudo cp bot /opt/tgbot/
+sudo cp tgbot /opt/tgbot/
 ```
 
 ### Step 3: Setup Service
@@ -526,6 +485,10 @@ docker rm -f tgbot               # Remove container
 | `ALLOWED_USERS` | No | - | Comma-separated user IDs |
 | `MAX_HISTORY` | No | 20 | Max messages in context |
 | `MAX_CONCURRENCY` | No | 20 | Max concurrent message handlers |
+| `SESSION_TTL` | No | 24h | Idle session lifetime, Go duration |
+| `OPENAI_MAX_RETRIES` | No | 3 | Max automatic retries for transient API errors |
+| `REQUEST_TIMEOUT` | No | 60s | Per-request timeout, Go duration |
+| `MAX_PROMPT_LENGTH` | No | 4000 | Max prompt length in characters |
 | `LOG_LEVEL` | No | info | Logging level (debug/info/warn/error) |
 | `LOG_FORMAT` | No | text | Log format (text/json) |
 

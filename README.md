@@ -21,11 +21,39 @@ Telegram bot providing access to AI through the OpenAI Responses API.
 # 1. Copy and fill configuration
 cp .env.example .env
 
-# 2. Run
+# 2. Build and run
+make build
+./tgbot
+
+# Or run directly
 go run ./cmd/bot
 
 # Or with Docker
 docker-compose up -d
+```
+
+## Development
+
+The project uses a `Makefile` for all build, test, and Docker workflows:
+
+```bash
+make help           # Show all available targets
+make build          # Build binary for current platform
+make build-linux    # Cross-compile for linux/amd64
+make test           # Run tests with race detector
+make lint           # Run go vet + golangci-lint
+make fmt            # Format code with gofmt
+make cover          # Tests + coverage report (HTML + threshold gate)
+make docker-build   # Build Docker image (DOCKER_USER required)
+make docker-push    # Build and push Docker image (DOCKER_USER required)
+make clean          # Remove build artifacts
+```
+
+Docker targets require `DOCKER_USER`:
+
+```bash
+make docker-build DOCKER_USER=myuser
+make docker-push  DOCKER_USER=myuser DOCKER_TAG=v1.0.0
 ```
 
 ## Configuration
@@ -40,6 +68,11 @@ Set environment variables in `.env`:
 | `OPENAI_BASE_URL` | No | Custom OpenAI-compatible base URL |
 | `ALLOWED_USERS` | No | Comma-separated user IDs |
 | `MAX_HISTORY` | No | Max messages in context (default: 20) |
+| `SESSION_TTL` | No | Idle session lifetime, Go duration string (default: `24h`) |
+| `MAX_CONCURRENCY` | No | Max concurrent message handlers (default: 20) |
+| `OPENAI_MAX_RETRIES` | No | Max automatic retries for transient API errors (default: 3) |
+| `REQUEST_TIMEOUT` | No | Per-request timeout, Go duration (default: `60s`) |
+| `MAX_PROMPT_LENGTH` | No | Max prompt length in characters (default: 4000) |
 | `LOG_LEVEL` | No | Logging level (`debug`, `info`, `warn`, `error`) |
 | `LOG_FORMAT` | No | Log format (`text`, `json`) |
 
@@ -89,6 +122,7 @@ The project uses:
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) - Architecture, modules, extension guide
 - [DEPLOYMENT.md](DEPLOYMENT.md) - Build and deployment to VPS
+- `make help` - List all Makefile targets
 
 ## License
 

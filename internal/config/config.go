@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -15,18 +16,26 @@ type Config struct {
 	TelegramToken string
 
 	// OpenAI
-	OpenAIKey     string
-	OpenAIModel   string
-	OpenAIBaseURL string
+	OpenAIKey        string
+	OpenAIModel      string
+	OpenAIBaseURL    string
+	OpenAIMaxRetries int
 
 	// Access control
 	AllowedUsers []int64
 
 	// Session
 	MaxHistory int
+	SessionTTL time.Duration
 
 	// Concurrency
 	MaxConcurrency int
+
+	// Timeouts
+	RequestTimeout time.Duration
+
+	// Input validation
+	MaxPromptLength int
 
 	// Logging
 	LogLevel  string // "debug", "info", "warn", "error"
@@ -46,16 +55,36 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	openAIMaxRetries, err := getEnvIntOrDefault("OPENAI_MAX_RETRIES", 3)
+	if err != nil {
+		return nil, err
+	}
+	sessionTTL, err := getEnvDurationOrDefault("SESSION_TTL", 24*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	requestTimeout, err := getEnvDurationOrDefault("REQUEST_TIMEOUT", 60*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	maxPromptLength, err := getEnvIntOrDefault("MAX_PROMPT_LENGTH", 4000)
+	if err != nil {
+		return nil, err
+	}
 
 	cfg := &Config{
-		TelegramToken:  os.Getenv("TELEGRAM_BOT_TOKEN"),
-		OpenAIKey:      os.Getenv("OPENAI_API_KEY"),
-		OpenAIModel:    getEnvOrDefault("OPENAI_MODEL", "gpt-4o"),
-		OpenAIBaseURL:  getEnvOrDefault("OPENAI_BASE_URL", ""),
-		MaxHistory:     maxHistory,
-		MaxConcurrency: maxConcurrency,
-		LogLevel:       getEnvOrDefault("LOG_LEVEL", "info"),
-		LogFormat:      getEnvOrDefault("LOG_FORMAT", "text"),
+		TelegramToken:    os.Getenv("TELEGRAM_BOT_TOKEN"),
+		OpenAIKey:        os.Getenv("OPENAI_API_KEY"),
+		OpenAIModel:      getEnvOrDefault("OPENAI_MODEL", "gpt-4o"),
+		OpenAIBaseURL:    getEnvOrDefault("OPENAI_BASE_URL", ""),
+		OpenAIMaxRetries: openAIMaxRetries,
+		MaxHistory:       maxHistory,
+		SessionTTL:       sessionTTL,
+		MaxConcurrency:   maxConcurrency,
+		RequestTimeout:   requestTimeout,
+		MaxPromptLength:  maxPromptLength,
+		LogLevel:         getEnvOrDefault("LOG_LEVEL", "info"),
+		LogFormat:        getEnvOrDefault("LOG_FORMAT", "text"),
 	}
 
 	// Validate required fields
@@ -102,4 +131,16 @@ func getEnvIntOrDefault(key string, defaultValue int) (int, error) {
 		return 0, fmt.Errorf("invalid integer for %s: %q", key, value)
 	}
 	return intValue, nil
+}
+
+func getEnvDurationOrDefault(key string, defaultValue time.Duration) (time.Duration, error) {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration for %s: %q (examples: 24h, 1h30m, 720h)", key, value)
+	}
+	return d, nil
 }

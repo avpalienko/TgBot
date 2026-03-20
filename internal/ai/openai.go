@@ -9,7 +9,6 @@ import (
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
 	"github.com/openai/openai-go/responses"
-	"github.com/user/tgbot/internal/session"
 )
 
 const (
@@ -25,10 +24,16 @@ type OpenAIProvider struct {
 }
 
 // NewOpenAIProvider creates a new OpenAI provider.
-func NewOpenAIProvider(apiKey, model, baseURL string) *OpenAIProvider {
+// maxRetries configures the number of automatic retries for transient errors
+// (connection errors, 408, 409, 429, >=500) with exponential backoff.
+// The openai-go SDK defaults to 2 retries if maxRetries < 0.
+func NewOpenAIProvider(apiKey, model, baseURL string, maxRetries int) *OpenAIProvider {
 	opts := []option.RequestOption{option.WithAPIKey(apiKey)}
 	if baseURL != "" {
 		opts = append(opts, option.WithBaseURL(baseURL))
+	}
+	if maxRetries >= 0 {
+		opts = append(opts, option.WithMaxRetries(maxRetries))
 	}
 
 	return &OpenAIProvider{
@@ -82,7 +87,7 @@ func (p *OpenAIProvider) respondChat(ctx context.Context, req Request) (Result, 
 
 	resp, err := p.client.Responses.New(ctx, params)
 	if err != nil {
-		return Result{}, fmt.Errorf("OpenAI Responses API error: %w", err)
+		return Result{}, classifyError(err)
 	}
 
 	return parseResponse(resp)
@@ -132,13 +137,13 @@ func (p *OpenAIProvider) respondWithImageTool(ctx context.Context, req Request, 
 
 	resp, err := p.client.Responses.New(ctx, params)
 	if err != nil {
-		return Result{}, fmt.Errorf("OpenAI Responses API error: %w", err)
+		return Result{}, classifyError(err)
 	}
 
 	return parseResponse(resp)
 }
 
-func buildHistoryInput(messages []session.Message) responses.ResponseInputParam {
+func buildHistoryInput(messages []Message) responses.ResponseInputParam {
 	input := make(responses.ResponseInputParam, 0, len(messages))
 	for _, msg := range messages {
 		item, ok := buildMessageInput(msg)
@@ -150,7 +155,7 @@ func buildHistoryInput(messages []session.Message) responses.ResponseInputParam 
 	return input
 }
 
-func buildMessageInput(msg session.Message) (responses.ResponseInputItemUnionParam, bool) {
+func buildMessageInput(msg Message) (responses.ResponseInputItemUnionParam, bool) {
 	role := normalizeRole(msg.Role)
 
 	if msg.ImageData == "" {

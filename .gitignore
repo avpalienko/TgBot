@@ -4,6 +4,7 @@
 .env.*.local
 
 # Binary
+tgbot
 bot.exe
 *.exe
 

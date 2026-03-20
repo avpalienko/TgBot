@@ -39,11 +39,11 @@ func main() {
 
 	// Initialize components
 	whitelist := auth.NewWhitelist(cfg.AllowedUsers, log.With("component", "auth"))
-	sessions := session.NewManager(cfg.MaxHistory)
-	aiProvider := ai.NewOpenAIProvider(cfg.OpenAIKey, cfg.OpenAIModel, cfg.OpenAIBaseURL)
+	sessions := session.NewManager(cfg.MaxHistory, cfg.SessionTTL)
+	aiProvider := ai.NewOpenAIProvider(cfg.OpenAIKey, cfg.OpenAIModel, cfg.OpenAIBaseURL, cfg.OpenAIMaxRetries)
 
 	// Create bot
-	tgBot, err := bot.New(cfg.TelegramToken, aiProvider, sessions, whitelist, log.With("component", "bot"), cfg.MaxConcurrency)
+	tgBot, err := bot.New(cfg.TelegramToken, aiProvider, sessions, whitelist, log.With("component", "bot"), cfg.MaxConcurrency, cfg.RequestTimeout, cfg.MaxPromptLength)
 	if err != nil {
 		log.Error("failed to create bot", "error", err)
 		os.Exit(1)
@@ -61,6 +61,8 @@ func main() {
 		log.Info("received signal, shutting down", "signal", sig)
 		cancel()
 	}()
+
+	sessions.StartCleanup(ctx, log.With("component", "session"))
 
 	// Run bot
 	if err := tgBot.Run(ctx); err != nil && err != context.Canceled {

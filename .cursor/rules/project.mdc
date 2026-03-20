@@ -18,14 +18,16 @@ internal/
     config/config.go         - env vars loading
     bot/bot.go               - Bot struct, Run loop, command dispatch
     bot/handlers.go          - text/photo message handling, AI dispatch
-    bot/routing.go           - image prefix parsing, intent matchers, size extraction
-    bot/send.go              - Telegram send helpers, photo download/encode
+    routing/routing.go       - image prefix parsing, intent matchers, size extraction
+    telegram/client.go       - Telegram send helpers, photo download/encode
     ai/provider.go           - AI provider contract
     ai/openai.go             - OpenAI Responses API client
+    ai/errors.go             - structured AI error types
     session/session.go       - conversation context, previous_response_id, latest image lookup
     auth/whitelist.go        - access control
     logger/logger.go         - logging abstraction (slog implementation)
     version/version.go       - build version info (git commit, date)
+Makefile                     - build, test, lint, fmt, cover, docker targets
 ```
 
 ## Key Dependencies
@@ -40,9 +42,13 @@ internal/
 - `OPENAI_API_KEY` - API key
 - `OPENAI_MODEL` - Responses API model (default: gpt-4o)
 - `OPENAI_BASE_URL` - optional compatible API base URL
+- `OPENAI_MAX_RETRIES` - max automatic retries for transient API errors (default: 3)
 - `ALLOWED_USERS` - whitelist user_id comma-separated
 - `MAX_HISTORY` - max stored messages in session (default: 20)
+- `SESSION_TTL` - idle session lifetime as Go duration, e.g. `24h`, `1h30m` (default: 24h)
 - `MAX_CONCURRENCY` - max concurrent message handlers (default: 20)
+- `REQUEST_TIMEOUT` - per-request timeout as Go duration, e.g. `60s`, `2m` (default: 60s)
+- `MAX_PROMPT_LENGTH` - max prompt length in characters; messages exceeding this are rejected (default: 4000)
 - `LOG_LEVEL` - logging level: debug, info, warn, error (default: info)
 - `LOG_FORMAT` - log format: text, json (default: text)
 
