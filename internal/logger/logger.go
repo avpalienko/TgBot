@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sync/atomic"
 )
 
 // Logger interface for application logging.
@@ -102,39 +103,42 @@ func (l *slogLogger) With(args ...any) Logger {
 	}
 }
 
-// Global logger instance
-var global Logger = Default()
+var global atomic.Value
+
+func init() {
+	global.Store(Default())
+}
 
 // SetGlobal sets the global logger instance
 func SetGlobal(l Logger) {
-	global = l
+	global.Store(l)
 }
 
 // Global returns the global logger instance
 func Global() Logger {
-	return global
+	return global.Load().(Logger)
 }
 
 // Package-level convenience functions using global logger
 
 func Debug(msg string, args ...any) {
-	global.Debug(msg, args...)
+	Global().Debug(msg, args...)
 }
 
 func Info(msg string, args ...any) {
-	global.Info(msg, args...)
+	Global().Info(msg, args...)
 }
 
 func Warn(msg string, args ...any) {
-	global.Warn(msg, args...)
+	Global().Warn(msg, args...)
 }
 
 func Error(msg string, args ...any) {
-	global.Error(msg, args...)
+	Global().Error(msg, args...)
 }
 
 func With(args ...any) Logger {
-	return global.With(args...)
+	return Global().With(args...)
 }
 
 // ContextKey for storing logger in context
@@ -150,5 +154,5 @@ func FromContext(ctx context.Context) Logger {
 	if l, ok := ctx.Value(contextKey{}).(Logger); ok {
 		return l
 	}
-	return global
+	return Global()
 }

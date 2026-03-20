@@ -91,7 +91,6 @@ func TestLooksLikeExplicitImageEdit(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -186,7 +185,6 @@ func TestParseExplicitImageCommand(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -247,7 +245,6 @@ func TestExtractImageSize(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -329,7 +326,6 @@ func TestIsSupportedImageSize(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.size, func(t *testing.T) {
 			t.Parallel()
 

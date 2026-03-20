@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -20,6 +22,8 @@ import (
 
 var imageSizePattern = regexp.MustCompile(`(?i)(\d{3,4})\s*[xх]\s*(\d{3,4})`)
 
+var httpImageClient = &http.Client{Timeout: 30 * time.Second}
+
 // Bot handles Telegram bot operations.
 type Bot struct {
 	api      *tgbotapi.BotAPI
@@ -28,6 +32,7 @@ type Bot struct {
 	auth     *auth.Whitelist
 	log      logger.Logger
 	sem      chan struct{}
+	wg       sync.WaitGroup
 	userMu   sync.Map // per-user *sync.Mutex to serialize session access
 }
 
@@ -75,7 +80,9 @@ func (b *Bot) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			b.log.Info("shutting down")
+			b.log.Info("shutting down, waiting for in-flight handlers")
+			b.wg.Wait()
+			b.log.Info("all handlers finished")
 			return ctx.Err()
 		case update := <-updates:
 			if update.Message == nil {
@@ -83,12 +90,16 @@ func (b *Bot) Run(ctx context.Context) error {
 			}
 			select {
 			case b.sem <- struct{}{}:
+				b.wg.Add(1)
 				go func(msg *tgbotapi.Message) {
+					defer b.wg.Done()
 					defer func() { <-b.sem }()
 					b.handleMessage(ctx, msg)
 				}(update.Message)
 			case <-ctx.Done():
-				b.log.Info("shutting down")
+				b.log.Info("shutting down, waiting for in-flight handlers")
+				b.wg.Wait()
+				b.log.Info("all handlers finished")
 				return ctx.Err()
 			}
 		}
@@ -126,13 +137,13 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
+	unlock := b.lockUser(userID)
+	defer unlock()
+
 	if msg.IsCommand() {
 		b.handleCommand(ctx, msg, log)
 		return
 	}
-
-	unlock := b.lockUser(userID)
-	defer unlock()
 
 	if len(msg.Photo) > 0 {
 		b.handlePhotoMessage(ctx, msg, log)
@@ -249,7 +260,7 @@ func (b *Bot) handleTextMessage(ctx context.Context, msg *tgbotapi.Message, log 
 		if !b.ensureSupportedImageSize(chatID, log, imageSize) {
 			return
 		}
-		imageData, err := b.downloadTelegramPhoto(msg.ReplyToMessage.Photo)
+		imageData, err := b.downloadTelegramPhoto(ctx, msg.ReplyToMessage.Photo)
 		if err != nil {
 			log.Error("failed to load reply photo", "error", err)
 			b.sendText(chatID, "Failed to load the replied photo. Please try again.")
@@ -291,7 +302,7 @@ func (b *Bot) handlePhotoMessage(ctx context.Context, msg *tgbotapi.Message, log
 
 	b.sendChatAction(chatID, tgbotapi.ChatTyping)
 
-	imageData, err := b.downloadTelegramPhoto(msg.Photo)
+	imageData, err := b.downloadTelegramPhoto(ctx, msg.Photo)
 	if err != nil {
 		log.Error("failed to process image", "error", err)
 		b.sendText(chatID, "Failed to process the image. Please try again.")
@@ -334,7 +345,7 @@ func (b *Bot) handleExplicitTextImageCommand(ctx context.Context, msg *tgbotapi.
 		return true
 	case ai.ModeEditImage:
 		if isReplyToPhoto(msg) {
-			imageData, err := b.downloadTelegramPhoto(msg.ReplyToMessage.Photo)
+			imageData, err := b.downloadTelegramPhoto(ctx, msg.ReplyToMessage.Photo)
 			if err != nil {
 				log.Error("failed to load reply photo", "error", err)
 				b.sendText(chatID, "Failed to load the replied photo. Please try again.")
@@ -433,7 +444,9 @@ func (b *Bot) ensureSupportedImageSize(chatID int64, log logger.Logger, imageSiz
 
 func (b *Bot) handleChatRequest(ctx context.Context, userID, chatID int64, log logger.Logger, userMsg session.Message) {
 	history := b.sessions.Get(userID)
-	messages := append(history, userMsg)
+	messages := make([]session.Message, len(history)+1)
+	copy(messages, history)
+	messages[len(history)] = userMsg
 
 	log.Debug("calling AI chat", "model", b.ai.ModelName(), "messages_count", len(messages))
 
@@ -496,7 +509,8 @@ func (b *Bot) sendPhoto(chatID int64, imageBytes []byte, mimeType, caption strin
 		Name:  filenameForMimeType(mimeType),
 		Bytes: imageBytes,
 	})
-	if caption != "" && len([]rune(caption)) <= 1024 {
+	captionUTF16Len := len(utf16.Encode([]rune(caption)))
+	if caption != "" && captionUTF16Len <= 1024 {
 		msg.Caption = caption
 	}
 
@@ -505,7 +519,7 @@ func (b *Bot) sendPhoto(chatID int64, imageBytes []byte, mimeType, caption strin
 		return
 	}
 
-	if caption != "" && len([]rune(caption)) > 1024 {
+	if caption != "" && captionUTF16Len > 1024 {
 		b.sendLongText(chatID, caption)
 	}
 }
@@ -517,7 +531,7 @@ func (b *Bot) sendChatAction(chatID int64, action string) {
 	}
 }
 
-func (b *Bot) downloadTelegramPhoto(photos []tgbotapi.PhotoSize) (string, error) {
+func (b *Bot) downloadTelegramPhoto(ctx context.Context, photos []tgbotapi.PhotoSize) (string, error) {
 	if len(photos) == 0 {
 		return "", fmt.Errorf("message does not contain a photo")
 	}
@@ -528,7 +542,7 @@ func (b *Bot) downloadTelegramPhoto(photos []tgbotapi.PhotoSize) (string, error)
 		return "", fmt.Errorf("failed to get file URL: %w", err)
 	}
 
-	return downloadAndEncodeImage(fileURL)
+	return downloadAndEncodeImage(ctx, fileURL)
 }
 
 func isReplyToPhoto(msg *tgbotapi.Message) bool {
@@ -726,8 +740,13 @@ func looksLikeImageGeneration(text string) bool  { return imageGenerationMatcher
 func looksLikeImageEdit(text string) bool         { return imageEditMatcher.matches(text) }
 func looksLikeExplicitImageEdit(text string) bool { return explicitImageEditMatcher.matches(text) }
 
-func downloadAndEncodeImage(url string) (string, error) {
-	resp, err := http.Get(url)
+func downloadAndEncodeImage(ctx context.Context, url string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create image request: %w", err)
+	}
+
+	resp, err := httpImageClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to download image: %w", err)
 	}

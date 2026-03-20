@@ -38,15 +38,24 @@ func Load() (*Config, error) {
 	// Load .env file if exists (ignore error if not found)
 	_ = godotenv.Load()
 
+	maxHistory, err := getEnvIntOrDefault("MAX_HISTORY", 20)
+	if err != nil {
+		return nil, err
+	}
+	maxConcurrency, err := getEnvIntOrDefault("MAX_CONCURRENCY", 20)
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := &Config{
-		TelegramToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
-		OpenAIKey:     os.Getenv("OPENAI_API_KEY"),
-		OpenAIModel:   getEnvOrDefault("OPENAI_MODEL", "gpt-4o"),
-		OpenAIBaseURL: getEnvOrDefault("OPENAI_BASE_URL", ""),
-		MaxHistory:     getEnvIntOrDefault("MAX_HISTORY", 20),
-		MaxConcurrency: getEnvIntOrDefault("MAX_CONCURRENCY", 20),
-		LogLevel:      getEnvOrDefault("LOG_LEVEL", "info"),
-		LogFormat:     getEnvOrDefault("LOG_FORMAT", "text"),
+		TelegramToken:  os.Getenv("TELEGRAM_BOT_TOKEN"),
+		OpenAIKey:      os.Getenv("OPENAI_API_KEY"),
+		OpenAIModel:    getEnvOrDefault("OPENAI_MODEL", "gpt-4o"),
+		OpenAIBaseURL:  getEnvOrDefault("OPENAI_BASE_URL", ""),
+		MaxHistory:     maxHistory,
+		MaxConcurrency: maxConcurrency,
+		LogLevel:       getEnvOrDefault("LOG_LEVEL", "info"),
+		LogFormat:      getEnvOrDefault("LOG_FORMAT", "text"),
 	}
 
 	// Validate required fields
@@ -83,11 +92,14 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return defaultValue
 }
 
-func getEnvIntOrDefault(key string, defaultValue int) int {
-	if value := os.Getenv(key); value != "" {
-		if intValue, err := strconv.Atoi(value); err == nil {
-			return intValue
-		}
+func getEnvIntOrDefault(key string, defaultValue int) (int, error) {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue, nil
 	}
-	return defaultValue
+	intValue, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid integer for %s: %q", key, value)
+	}
+	return intValue, nil
 }

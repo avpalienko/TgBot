@@ -3,7 +3,9 @@ package session
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"sync"
+	"time"
 )
 
 // Message represents a chat message
@@ -38,10 +40,13 @@ func NewManager(maxHistory int) *Manager {
 	}
 }
 
-// generateSessionID creates a unique session identifier
+// generateSessionID creates a unique session identifier.
+// Falls back to a timestamp-based ID if the crypto/rand source fails.
 func generateSessionID() string {
 	b := make([]byte, 8)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%x", time.Now().UnixNano())
+	}
 	return hex.EncodeToString(b)
 }
 
@@ -81,20 +86,6 @@ func (m *Manager) Get(userID int64) []Message {
 	return result
 }
 
-// Add appends messages to user's conversation history
-func (m *Manager) Add(userID int64, messages ...Message) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	session := m.getOrCreateSession(userID)
-	session.Messages = append(session.Messages, messages...)
-
-	// Trim to max history (keep last N messages)
-	if len(session.Messages) > m.maxHistory {
-		session.Messages = session.Messages[len(session.Messages)-m.maxHistory:]
-	}
-}
-
 // AddWithResponseID appends messages and updates the response ID in a single lock acquisition.
 func (m *Manager) AddWithResponseID(userID int64, responseID string, messages ...Message) {
 	m.mu.Lock()
@@ -121,15 +112,6 @@ func (m *Manager) GetPreviousResponseID(userID int64) string {
 	}
 
 	return session.PreviousResponseID
-}
-
-// SetPreviousResponseID updates the latest stored Responses API response ID.
-func (m *Manager) SetPreviousResponseID(userID int64, responseID string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	session := m.getOrCreateSession(userID)
-	session.PreviousResponseID = responseID
 }
 
 // GetLatestImage returns the most recent image stored in the session.
@@ -163,16 +145,4 @@ func (m *Manager) Clear(userID int64) string {
 		PreviousResponseID: "",
 	}
 	return newSessionID
-}
-
-// Count returns the number of messages in user's history
-func (m *Manager) Count(userID int64) int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	session, exists := m.sessions[userID]
-	if !exists || session == nil {
-		return 0
-	}
-	return len(session.Messages)
 }
