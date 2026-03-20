@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
+	"unicode/utf8"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/user/tgbot/internal/ai"
@@ -25,10 +27,19 @@ type Bot struct {
 	sessions *session.Manager
 	auth     *auth.Whitelist
 	log      logger.Logger
+	sem      chan struct{}
+	userMu   sync.Map // per-user *sync.Mutex to serialize session access
+}
+
+func (b *Bot) lockUser(userID int64) func() {
+	v, _ := b.userMu.LoadOrStore(userID, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 // New creates a new Bot instance.
-func New(token string, aiProvider ai.Provider, sessions *session.Manager, whitelist *auth.Whitelist, log logger.Logger) (*Bot, error) {
+func New(token string, aiProvider ai.Provider, sessions *session.Manager, whitelist *auth.Whitelist, log logger.Logger, maxConcurrency int) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bot: %w", err)
@@ -36,12 +47,17 @@ func New(token string, aiProvider ai.Provider, sessions *session.Manager, whitel
 
 	log.Info("authorized", "username", api.Self.UserName)
 
+	if maxConcurrency <= 0 {
+		maxConcurrency = 20
+	}
+
 	return &Bot{
 		api:      api,
 		ai:       aiProvider,
 		sessions: sessions,
 		auth:     whitelist,
 		log:      log,
+		sem:      make(chan struct{}, maxConcurrency),
 	}, nil
 }
 
@@ -65,7 +81,16 @@ func (b *Bot) Run(ctx context.Context) error {
 			if update.Message == nil {
 				continue
 			}
-			go b.handleMessage(ctx, update.Message)
+			select {
+			case b.sem <- struct{}{}:
+				go func(msg *tgbotapi.Message) {
+					defer func() { <-b.sem }()
+					b.handleMessage(ctx, msg)
+				}(update.Message)
+			case <-ctx.Done():
+				b.log.Info("shutting down")
+				return ctx.Err()
+			}
 		}
 	}
 }
@@ -105,6 +130,9 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		b.handleCommand(ctx, msg, log)
 		return
 	}
+
+	unlock := b.lockUser(userID)
+	defer unlock()
 
 	if len(msg.Photo) > 0 {
 		b.handlePhotoMessage(ctx, msg, log)
@@ -213,80 +241,8 @@ func (b *Bot) handleTextMessage(ctx context.Context, msg *tgbotapi.Message, log 
 
 	b.sendChatAction(chatID, tgbotapi.ChatTyping)
 
-	if explicit, ok := parseExplicitImageCommand(imagePrompt); ok {
-		switch explicit.Mode {
-		case ai.ModeGenerateImage:
-			prompt := explicit.Prompt
-			if parsedPrompt, parsedSize := extractImageSize(prompt); parsedSize != "" {
-				prompt = parsedPrompt
-				imageSize = parsedSize
-			}
-			if !b.ensureSupportedImageSize(chatID, log, imageSize) {
-				return
-			}
-			b.logImageModeSelected(log, ai.ModeGenerateImage, "explicit_prefix", "none", imageSize)
-			b.handleNonChatRequest(ctx, userID, chatID, log, ai.Request{
-				Mode:               ai.ModeGenerateImage,
-				Text:               prompt,
-				ImageSize:          imageSize,
-				PreviousResponseID: b.sessions.GetPreviousResponseID(userID),
-			}, session.Message{Role: "user", Content: text})
-			return
-		case ai.ModeEditImage:
-			prompt := explicit.Prompt
-			if parsedPrompt, parsedSize := extractImageSize(prompt); parsedSize != "" {
-				prompt = parsedPrompt
-				imageSize = parsedSize
-			}
-			if !b.ensureSupportedImageSize(chatID, log, imageSize) {
-				return
-			}
-			if isReplyToPhoto(msg) {
-				imageData, err := b.downloadTelegramPhoto(msg.ReplyToMessage.Photo)
-				if err != nil {
-					log.Error("failed to load reply photo", "error", err)
-					b.sendText(chatID, "Failed to load the replied photo. Please try again.")
-					return
-				}
-
-				b.logImageModeSelected(log, ai.ModeEditImage, "explicit_prefix", "reply_photo", imageSize)
-				b.handleNonChatRequest(ctx, userID, chatID, log, ai.Request{
-					Mode:               ai.ModeEditImage,
-					Text:               prompt,
-					ImageSize:          imageSize,
-					InputImageData:     imageData,
-					PreviousResponseID: b.sessions.GetPreviousResponseID(userID),
-				}, session.Message{Role: "user", Content: text, ImageData: imageData})
-				return
-			}
-
-			if latestImage := b.sessions.GetLatestImage(userID); latestImage != "" {
-				b.logImageModeSelected(log, ai.ModeEditImage, "explicit_prefix", "latest_session_image", imageSize)
-				b.handleNonChatRequest(ctx, userID, chatID, log, ai.Request{
-					Mode:               ai.ModeEditImage,
-					Text:               prompt,
-					ImageSize:          imageSize,
-					InputImageData:     latestImage,
-					PreviousResponseID: b.sessions.GetPreviousResponseID(userID),
-				}, session.Message{Role: "user", Content: text, ImageData: latestImage})
-				return
-			}
-
-			if explicit.FallbackToGenerate {
-				b.logImageModeSelected(log, ai.ModeGenerateImage, "explicit_prefix_fallback", "none", imageSize)
-				b.handleNonChatRequest(ctx, userID, chatID, log, ai.Request{
-					Mode:               ai.ModeGenerateImage,
-					Text:               prompt,
-					ImageSize:          imageSize,
-					PreviousResponseID: b.sessions.GetPreviousResponseID(userID),
-				}, session.Message{Role: "user", Content: text})
-				return
-			}
-
-			log.Info("image mode requested but no image source available", "mode", ai.ModeEditImage, "trigger", "explicit_prefix", "image_size", imageSize)
-			b.sendText(chatID, "No image found to edit. Reply to a photo, send a photo with a caption, or use `img:` after generating an image first.")
-			return
-		}
+	if b.handleExplicitTextImageCommand(ctx, msg, log, text, imagePrompt, imageSize) {
+		return
 	}
 
 	if looksLikeImageEdit(imagePrompt) && isReplyToPhoto(msg) {
@@ -299,15 +255,7 @@ func (b *Bot) handleTextMessage(ctx context.Context, msg *tgbotapi.Message, log 
 			b.sendText(chatID, "Failed to load the replied photo. Please try again.")
 			return
 		}
-
-		b.logImageModeSelected(log, ai.ModeEditImage, "reply_text_edit_intent", "reply_photo", imageSize)
-		b.handleNonChatRequest(ctx, userID, chatID, log, ai.Request{
-			Mode:               ai.ModeEditImage,
-			Text:               imagePrompt,
-			ImageSize:          imageSize,
-			InputImageData:     imageData,
-			PreviousResponseID: b.sessions.GetPreviousResponseID(userID),
-		}, session.Message{Role: "user", Content: text, ImageData: imageData})
+		b.dispatchImageEdit(ctx, userID, chatID, log, "reply_text_edit_intent", "reply_photo", imagePrompt, imageSize, imageData, session.Message{Role: "user", Content: text, ImageData: imageData})
 		return
 	}
 
@@ -315,13 +263,7 @@ func (b *Bot) handleTextMessage(ctx context.Context, msg *tgbotapi.Message, log 
 		if !b.ensureSupportedImageSize(chatID, log, imageSize) {
 			return
 		}
-		b.logImageModeSelected(log, ai.ModeGenerateImage, "text_generation_intent", "none", imageSize)
-		b.handleNonChatRequest(ctx, userID, chatID, log, ai.Request{
-			Mode:               ai.ModeGenerateImage,
-			Text:               imagePrompt,
-			ImageSize:          imageSize,
-			PreviousResponseID: b.sessions.GetPreviousResponseID(userID),
-		}, session.Message{Role: "user", Content: text})
+		b.dispatchImageGeneration(ctx, userID, chatID, log, "text_generation_intent", imagePrompt, imageSize, session.Message{Role: "user", Content: text})
 		return
 	}
 
@@ -330,14 +272,7 @@ func (b *Bot) handleTextMessage(ctx context.Context, msg *tgbotapi.Message, log 
 			if !b.ensureSupportedImageSize(chatID, log, imageSize) {
 				return
 			}
-			b.logImageModeSelected(log, ai.ModeEditImage, "text_edit_intent", "latest_session_image", imageSize)
-			b.handleNonChatRequest(ctx, userID, chatID, log, ai.Request{
-				Mode:               ai.ModeEditImage,
-				Text:               imagePrompt,
-				ImageSize:          imageSize,
-				InputImageData:     latestImage,
-				PreviousResponseID: b.sessions.GetPreviousResponseID(userID),
-			}, session.Message{Role: "user", Content: text, ImageData: latestImage})
+			b.dispatchImageEdit(ctx, userID, chatID, log, "text_edit_intent", "latest_session_image", imagePrompt, imageSize, latestImage, session.Message{Role: "user", Content: text, ImageData: latestImage})
 			return
 		}
 	}
@@ -364,18 +299,15 @@ func (b *Bot) handlePhotoMessage(ctx context.Context, msg *tgbotapi.Message, log
 	}
 
 	userMsg := session.Message{Role: "user", Content: caption, ImageData: imageData}
+	if b.handleExplicitPhotoImageCommand(ctx, userID, chatID, log, userMsg, imageData, imagePrompt, imageSize) {
+		return
+	}
+
 	if looksLikeImageEdit(imagePrompt) {
 		if !b.ensureSupportedImageSize(chatID, log, imageSize) {
 			return
 		}
-		b.logImageModeSelected(log, ai.ModeEditImage, "photo_caption_edit_intent", "uploaded_photo", imageSize)
-		b.handleNonChatRequest(ctx, userID, chatID, log, ai.Request{
-			Mode:               ai.ModeEditImage,
-			Text:               imagePrompt,
-			ImageSize:          imageSize,
-			InputImageData:     imageData,
-			PreviousResponseID: b.sessions.GetPreviousResponseID(userID),
-		}, userMsg)
+		b.dispatchImageEdit(ctx, userID, chatID, log, "photo_caption_edit_intent", "uploaded_photo", imagePrompt, imageSize, imageData, userMsg)
 		return
 	}
 
@@ -385,6 +317,108 @@ func (b *Bot) handlePhotoMessage(ctx context.Context, msg *tgbotapi.Message, log
 
 func (b *Bot) logImageModeSelected(log logger.Logger, mode ai.RequestMode, trigger, imageSource, imageSize string) {
 	log.Info("image mode selected", "mode", mode, "trigger", trigger, "image_source", imageSource, "image_size", imageSize)
+}
+
+func (b *Bot) handleExplicitTextImageCommand(ctx context.Context, msg *tgbotapi.Message, log logger.Logger, originalText, imagePrompt, imageSize string) bool {
+	explicit, prompt, imageSize, ok := b.prepareExplicitImageCommand(msg.Chat.ID, log, imagePrompt, imageSize)
+	if !ok {
+		return false
+	}
+
+	userID := msg.From.ID
+	chatID := msg.Chat.ID
+
+	switch explicit.Mode {
+	case ai.ModeGenerateImage:
+		b.dispatchImageGeneration(ctx, userID, chatID, log, "explicit_prefix", prompt, imageSize, session.Message{Role: "user", Content: originalText})
+		return true
+	case ai.ModeEditImage:
+		if isReplyToPhoto(msg) {
+			imageData, err := b.downloadTelegramPhoto(msg.ReplyToMessage.Photo)
+			if err != nil {
+				log.Error("failed to load reply photo", "error", err)
+				b.sendText(chatID, "Failed to load the replied photo. Please try again.")
+				return true
+			}
+
+			b.dispatchImageEdit(ctx, userID, chatID, log, "explicit_prefix", "reply_photo", prompt, imageSize, imageData, session.Message{Role: "user", Content: originalText, ImageData: imageData})
+			return true
+		}
+
+		if latestImage := b.sessions.GetLatestImage(userID); latestImage != "" {
+			b.dispatchImageEdit(ctx, userID, chatID, log, "explicit_prefix", "latest_session_image", prompt, imageSize, latestImage, session.Message{Role: "user", Content: originalText, ImageData: latestImage})
+			return true
+		}
+
+		if explicit.FallbackToGenerate {
+			b.dispatchImageGeneration(ctx, userID, chatID, log, "explicit_prefix_fallback", prompt, imageSize, session.Message{Role: "user", Content: originalText})
+			return true
+		}
+
+		log.Info("image mode requested but no image source available", "mode", ai.ModeEditImage, "trigger", "explicit_prefix", "image_size", imageSize)
+		b.sendText(chatID, "No image found to edit. Reply to a photo, send a photo with a caption, or use `img:` after generating an image first.")
+		return true
+	default:
+		return false
+	}
+}
+
+func (b *Bot) handleExplicitPhotoImageCommand(ctx context.Context, userID, chatID int64, log logger.Logger, userMsg session.Message, imageData, imagePrompt, imageSize string) bool {
+	explicit, prompt, imageSize, ok := b.prepareExplicitImageCommand(chatID, log, imagePrompt, imageSize)
+	if !ok {
+		return false
+	}
+
+	switch explicit.Mode {
+	case ai.ModeGenerateImage:
+		b.dispatchImageGeneration(ctx, userID, chatID, log, "photo_caption_explicit_prefix", prompt, imageSize, userMsg)
+		return true
+	case ai.ModeEditImage:
+		b.dispatchImageEdit(ctx, userID, chatID, log, "photo_caption_explicit_prefix", "uploaded_photo", prompt, imageSize, imageData, userMsg)
+		return true
+	default:
+		return false
+	}
+}
+
+func (b *Bot) prepareExplicitImageCommand(chatID int64, log logger.Logger, imagePrompt, imageSize string) (explicitImageCommand, string, string, bool) {
+	explicit, ok := parseExplicitImageCommand(imagePrompt)
+	if !ok {
+		return explicitImageCommand{}, "", imageSize, false
+	}
+
+	prompt := explicit.Prompt
+	if parsedPrompt, parsedSize := extractImageSize(prompt); parsedSize != "" {
+		prompt = parsedPrompt
+		imageSize = parsedSize
+	}
+
+	if !b.ensureSupportedImageSize(chatID, log, imageSize) {
+		return explicitImageCommand{}, "", imageSize, false
+	}
+
+	return explicit, prompt, imageSize, true
+}
+
+func (b *Bot) dispatchImageGeneration(ctx context.Context, userID, chatID int64, log logger.Logger, trigger, prompt, imageSize string, userMsg session.Message) {
+	b.logImageModeSelected(log, ai.ModeGenerateImage, trigger, "none", imageSize)
+	b.handleNonChatRequest(ctx, userID, chatID, log, ai.Request{
+		Mode:               ai.ModeGenerateImage,
+		Text:               prompt,
+		ImageSize:          imageSize,
+		PreviousResponseID: b.sessions.GetPreviousResponseID(userID),
+	}, userMsg)
+}
+
+func (b *Bot) dispatchImageEdit(ctx context.Context, userID, chatID int64, log logger.Logger, trigger, imageSource, prompt, imageSize, imageData string, userMsg session.Message) {
+	b.logImageModeSelected(log, ai.ModeEditImage, trigger, imageSource, imageSize)
+	b.handleNonChatRequest(ctx, userID, chatID, log, ai.Request{
+		Mode:               ai.ModeEditImage,
+		Text:               prompt,
+		ImageSize:          imageSize,
+		InputImageData:     imageData,
+		PreviousResponseID: b.sessions.GetPreviousResponseID(userID),
+	}, userMsg)
 }
 
 func (b *Bot) ensureSupportedImageSize(chatID int64, log logger.Logger, imageSize string) bool {
@@ -443,8 +477,7 @@ func (b *Bot) persistResult(userID int64, userMsg session.Message, result ai.Res
 		assistantMsg.ImageData = encodeImageDataURI(result.ImageMimeType, result.ImageBytes)
 	}
 
-	b.sessions.Add(userID, userMsg, assistantMsg)
-	b.sessions.SetPreviousResponseID(userID, result.ResponseID)
+	b.sessions.AddWithResponseID(userID, result.ResponseID, userMsg, assistantMsg)
 }
 
 func (b *Bot) sendResult(chatID int64, result ai.Result) {
@@ -572,13 +605,43 @@ func parseExplicitImageCommand(text string) (explicitImageCommand, bool) {
 	return explicitImageCommand{}, false
 }
 
-func looksLikeImageGeneration(text string) bool {
+type textMatcher struct {
+	excludes []string
+	prefixes []string
+	phrases  []string
+}
+
+func (m *textMatcher) matches(text string) bool {
 	if text == "" {
 		return false
 	}
-
 	lower := strings.ToLower(strings.TrimSpace(text))
-	prefixes := []string{
+	for _, ex := range m.excludes {
+		if strings.Contains(lower, ex) {
+			return false
+		}
+	}
+	for _, p := range m.prefixes {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	for _, p := range m.phrases {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+var sharedEditPhrases = []string{
+	"remove background",
+	"убери фон",
+	"сделай фон",
+}
+
+var imageGenerationMatcher = textMatcher{
+	prefixes: []string{
 		"нарисуй",
 		"сгенерируй",
 		"создай изображение",
@@ -593,35 +656,17 @@ func looksLikeImageGeneration(text string) bool {
 		"make an image",
 		"illustrate ",
 		"render ",
-	}
-	for _, prefix := range prefixes {
-		if strings.HasPrefix(lower, prefix) {
-			return true
-		}
-	}
-
-	phrases := []string{
+	},
+	phrases: []string{
 		"сгенерируй изображение",
 		"generate an image",
 		"make me an image",
 		"create a poster",
-	}
-	for _, phrase := range phrases {
-		if strings.Contains(lower, phrase) {
-			return true
-		}
-	}
-
-	return false
+	},
 }
 
-func looksLikeImageEdit(text string) bool {
-	if text == "" {
-		return false
-	}
-
-	lower := strings.ToLower(strings.TrimSpace(text))
-	prefixes := []string{
+var imageEditMatcher = textMatcher{
+	prefixes: []string{
 		"отредактируй",
 		"измени",
 		"убери",
@@ -637,42 +682,18 @@ func looksLikeImageEdit(text string) bool {
 		"add ",
 		"make it ",
 		"turn it ",
-	}
-	for _, prefix := range prefixes {
-		if strings.HasPrefix(lower, prefix) {
-			return true
-		}
-	}
-
-	phrases := []string{
-		"remove background",
-		"убери фон",
-		"сделай фон",
+	},
+	phrases: append([]string{
 		"сделай реалистичнее",
 		"make it realistic",
 		"make it look like",
 		"change the background",
-	}
-	for _, phrase := range phrases {
-		if strings.Contains(lower, phrase) {
-			return true
-		}
-	}
-
-	return false
+	}, sharedEditPhrases...),
 }
 
-func looksLikeExplicitImageEdit(text string) bool {
-	if text == "" {
-		return false
-	}
-
-	lower := strings.ToLower(strings.TrimSpace(text))
-	if strings.Contains(lower, "пример") || strings.Contains(lower, "объясн") || strings.Contains(lower, "ответ") {
-		return false
-	}
-
-	phrases := []string{
+var explicitImageEditMatcher = textMatcher{
+	excludes: []string{"пример", "объясн", "ответ"},
+	phrases: append([]string{
 		"edit the image",
 		"edit this image",
 		"edit the photo",
@@ -682,7 +703,6 @@ func looksLikeExplicitImageEdit(text string) bool {
 		"change the latest image",
 		"change the latest photo",
 		"update the image",
-		"remove background",
 		"make the image",
 		"make the photo",
 		"измени изображение",
@@ -697,20 +717,14 @@ func looksLikeExplicitImageEdit(text string) bool {
 		"добавь ему",
 		"добавь ей",
 		"добавь им",
-		"убери фон",
-		"сделай фон",
 		"сделай изображение",
 		"сделай картинку",
-	}
-
-	for _, phrase := range phrases {
-		if strings.Contains(lower, phrase) {
-			return true
-		}
-	}
-
-	return false
+	}, sharedEditPhrases...),
 }
+
+func looksLikeImageGeneration(text string) bool  { return imageGenerationMatcher.matches(text) }
+func looksLikeImageEdit(text string) bool         { return imageEditMatcher.matches(text) }
+func looksLikeExplicitImageEdit(text string) bool { return explicitImageEditMatcher.matches(text) }
 
 func downloadAndEncodeImage(url string) (string, error) {
 	resp, err := http.Get(url)
@@ -768,15 +782,13 @@ func (b *Bot) sendText(chatID int64, text string) {
 }
 
 func (b *Bot) sendLongText(chatID int64, text string) {
-	// Telegram message limit is 4096 characters
 	const maxLen = 4000
 
-	if len(text) <= maxLen {
+	if utf8.RuneCountInString(text) <= maxLen {
 		b.sendText(chatID, text)
 		return
 	}
 
-	// Split by paragraphs or sentences
 	parts := splitText(text, maxLen)
 	for _, part := range parts {
 		b.sendText(chatID, part)
@@ -787,24 +799,27 @@ func splitText(text string, maxLen int) []string {
 	var parts []string
 
 	for len(text) > 0 {
-		if len(text) <= maxLen {
+		if utf8.RuneCountInString(text) <= maxLen {
 			parts = append(parts, text)
 			break
 		}
 
-		// Try to split at paragraph
-		splitIdx := strings.LastIndex(text[:maxLen], "\n\n")
+		// Find the byte offset that corresponds to maxLen runes
+		byteLimit := 0
+		for i := 0; i < maxLen; i++ {
+			_, size := utf8.DecodeRuneInString(text[byteLimit:])
+			byteLimit += size
+		}
+
+		splitIdx := strings.LastIndex(text[:byteLimit], "\n\n")
 		if splitIdx == -1 {
-			// Try to split at newline
-			splitIdx = strings.LastIndex(text[:maxLen], "\n")
+			splitIdx = strings.LastIndex(text[:byteLimit], "\n")
 		}
 		if splitIdx == -1 {
-			// Try to split at sentence
-			splitIdx = strings.LastIndex(text[:maxLen], ". ")
+			splitIdx = strings.LastIndex(text[:byteLimit], ". ")
 		}
 		if splitIdx == -1 {
-			// Force split at maxLen
-			splitIdx = maxLen - 1
+			splitIdx = byteLimit - 1
 		}
 
 		parts = append(parts, text[:splitIdx+1])

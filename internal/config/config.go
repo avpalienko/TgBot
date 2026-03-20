@@ -25,6 +25,9 @@ type Config struct {
 	// Session
 	MaxHistory int
 
+	// Concurrency
+	MaxConcurrency int
+
 	// Logging
 	LogLevel  string // "debug", "info", "warn", "error"
 	LogFormat string // "text", "json"
@@ -40,7 +43,8 @@ func Load() (*Config, error) {
 		OpenAIKey:     os.Getenv("OPENAI_API_KEY"),
 		OpenAIModel:   getEnvOrDefault("OPENAI_MODEL", "gpt-4o"),
 		OpenAIBaseURL: getEnvOrDefault("OPENAI_BASE_URL", ""),
-		MaxHistory:    getEnvIntOrDefault("MAX_HISTORY", 20),
+		MaxHistory:     getEnvIntOrDefault("MAX_HISTORY", 20),
+		MaxConcurrency: getEnvIntOrDefault("MAX_CONCURRENCY", 20),
 		LogLevel:      getEnvOrDefault("LOG_LEVEL", "info"),
 		LogFormat:     getEnvOrDefault("LOG_FORMAT", "text"),
 	}

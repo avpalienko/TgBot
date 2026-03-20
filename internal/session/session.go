@@ -95,6 +95,21 @@ func (m *Manager) Add(userID int64, messages ...Message) {
 	}
 }
 
+// AddWithResponseID appends messages and updates the response ID in a single lock acquisition.
+func (m *Manager) AddWithResponseID(userID int64, responseID string, messages ...Message) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	session := m.getOrCreateSession(userID)
+	session.Messages = append(session.Messages, messages...)
+
+	if len(session.Messages) > m.maxHistory {
+		session.Messages = session.Messages[len(session.Messages)-m.maxHistory:]
+	}
+
+	session.PreviousResponseID = responseID
+}
+
 // GetPreviousResponseID returns the latest stored Responses API response ID.
 func (m *Manager) GetPreviousResponseID(userID int64) string {
 	m.mu.RLock()
